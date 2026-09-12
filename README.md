@@ -103,4 +103,4 @@ CI runs syntax/lint, unit tests, and a secretless API smoke test. PostgreSQL/Red
 
 ## License
 
-LICENSE_DECISION_REQUIRED. No license file is included until the project owner selects one.
+Apache-2.0. See `LICENSE`.
