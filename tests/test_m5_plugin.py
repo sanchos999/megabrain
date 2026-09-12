@@ -10,14 +10,14 @@ from pathlib import Path
 
 import pytest
 
-PLUGIN_DIR = Path.home() / ".hermes" / "plugins" / "megabrain"
+PLUGIN_DIR = Path(__file__).resolve().parents[1] / "plugins" / "hermes" / "megabrain"
 INIT = PLUGIN_DIR / "__init__.py"
 
 
 def _load_plugin():
     # agent.memory_provider is stdlib-only; resolve it from the hermes-agent tree
     sys.path.insert(0, str(PLUGIN_DIR))
-    sys.path.insert(0, str(Path.home() / ".hermes" / "hermes-agent"))
+    
     spec = importlib.util.spec_from_file_location(
         "_hermes_user_memory.megabrain", str(INIT))
     mod = importlib.util.module_from_spec(spec)
