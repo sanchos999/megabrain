@@ -1,0 +1,41 @@
+# Runtime and private data
+.env
+.env.*
+!.env.example
+config/*.json
+state/
+*.db
+*.db-*
+*.sql.gz
+*.dump
+backups/
+rollback/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Models and generated artifacts
+models/
+*.safetensors
+*.onnx
+*.bin
+*.gguf
+cache/
+logs/
+traces/
+benchmarks/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store

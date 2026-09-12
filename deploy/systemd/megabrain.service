@@ -1,0 +1,14 @@
+[Unit]
+Description=MegaBrain API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/megabrain
+EnvironmentFile=%h/.config/megabrain/megabrain.env
+ExecStart=%h/.config/megabrain/venv/bin/uvicorn api.main:app --host ${MEGABRAIN_HOST} --port ${MEGABRAIN_PORT}
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

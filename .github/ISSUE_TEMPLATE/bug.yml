@@ -1,0 +1,10 @@
+name: Bug report
+about: Report a reproducible product defect
+body:
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include a minimal, secret-free reproduction.
+    validations:
+      required: true

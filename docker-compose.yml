@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: megabrain
+      POSTGRES_USER: megabrain
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U megabrain -d megabrain"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --appendonly, "yes"]
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  api:
+    build: .
+    environment:
+      MEGABRAIN_DATABASE_URL: "postgresql://megabrain:${POSTGRES_PASSWORD}@postgres:5432/megabrain"
+      MEGABRAIN_REDIS_URL: redis://redis:6379/0
+      MEGABRAIN_API_TOKEN: "${MEGABRAIN_API_TOKEN:-}"
+      MEGABRAIN_HOST: 0.0.0.0
+      MEGABRAIN_PORT: "4300"
+    ports: ["4300:4300"]
+    volumes: [megabrain-data:/app/state, model-data:/app/models]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:4300/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+  embedding-worker:
+    build: .
+    command: [python, scripts/embedding_worker.py]
+    environment:
+      MEGABRAIN_DATABASE_URL: "postgresql://megabrain:${POSTGRES_PASSWORD}@postgres:5432/megabrain"
+      MEGABRAIN_REDIS_URL: redis://redis:6379/0
+    volumes: [megabrain-data:/app/state, model-data:/app/models]
+    depends_on: {api: {condition: service_healthy}}
+  consolidation-worker:
+    build: .
+    command: [python, scripts/consolidation_worker.py]
+    environment:
+      MEGABRAIN_DATABASE_URL: "postgresql://megabrain:${POSTGRES_PASSWORD}@postgres:5432/megabrain"
+      MEGABRAIN_REDIS_URL: redis://redis:6379/0
+    volumes: [megabrain-data:/app/state, model-data:/app/models]
+    depends_on: {api: {condition: service_healthy}}
+volumes:
+  postgres-data:
+  redis-data:
+  megabrain-data:
+  model-data:
