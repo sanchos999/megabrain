@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "recipe": {
+    "name": "MegaBrain standalone FastAPI",
+    "kind": "fastapi",
+    "bootstrap": ["uv pip install --python .venv/bin/python -e ."],
+    "build": [".venv/bin/python -m compileall -q api clients cli.py consolidation core events integrations projects retrieval schemas storage scripts tests megabrain_cli"],
+    "test": [".venv/bin/python -m pytest -q"],
+    "start": ".venv/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 4301",
+    "port": 4301,
+    "readinessPath": "/health",
+    "evidence": ["Project-managed venv", "Secretless local verification", "Migrations remain explicit operational step"]
+  }
+}
