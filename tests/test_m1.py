@@ -304,7 +304,7 @@ def test_auth():
         r = client.post("/v1/events", json=_ev(), headers={})
         assert r.status_code == 401
         r = client.post("/v1/events", json=_ev(),
-                        headers={"Authorization": "Bearer CHANGE_ME"})
+                        headers={"Authorization": "Bearer testtoken123"})
         assert r.status_code == 200
     finally:
         cfg["api_token"] = old or ""
