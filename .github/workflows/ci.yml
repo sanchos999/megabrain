@@ -22,7 +22,7 @@ jobs:
       - run: python -m compileall -q api clients core events integrations projects retrieval schemas storage scripts
       - run: python scripts/migrate.py
         env:
-          MEGABRAIN_DATABASE_URL: postgresql://megabrain:***@localhost:5432/megabrain
+          MEGABRAIN_DATABASE_URL: postgresql://megabrain:ci@localhost:5432/megabrain
       - run: pytest -q
         env:
           MEGABRAIN_DATABASE_URL: postgresql://megabrain:ci@localhost:5432/megabrain
