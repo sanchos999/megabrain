@@ -1,0 +1,10 @@
+name: megabrain
+version: 0.1.0
+description: "MegaBrain memory provider — durable event capture + LLM-free context capsule recall over REST"
+hooks:
+  - sync_turn
+  - on_turn_start
+  - on_session_end
+  - on_session_switch
+  - prefetch
+  - queue_prefetch

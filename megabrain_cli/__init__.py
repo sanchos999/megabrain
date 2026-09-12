@@ -1,0 +1,1 @@
+"""MegaBrain command-line package."""
