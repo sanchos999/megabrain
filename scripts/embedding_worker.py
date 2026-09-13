@@ -30,7 +30,7 @@ sys.path.insert(0, str(ROOT))
 
 from core.config import load_config
 
-STATE = ROOT / "state"
+STATE = Path(os.environ.get("MB_STATE_DIR") or (ROOT / "state"))
 MODEL_VERSION = "xenova-bge-m3-onnx-int8-512"
 MODEL = "bge-m3-int8-onnx"
 DIM = 1024

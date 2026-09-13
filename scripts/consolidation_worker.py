@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from consolidation.worker import ConsolidationWorker
 
-LOCK = ROOT / "state" / "consolidation-worker.lock"
+LOCK = Path(os.environ.get("MB_STATE_DIR") or (ROOT / "state")) / "consolidation-worker.lock"
 SLEEP_S = float(os.environ.get("MB_CONSOLIDATION_SLEEP_S", "60.0"))
 SLEEP_IDLE_S = float(os.environ.get("MB_CONSOLIDATION_IDLE_SLEEP_S", "300.0"))
 
