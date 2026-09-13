@@ -15,7 +15,7 @@ import os
 import sys
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 BASE = os.environ.get("MB_BASE_URL", "http://127.0.0.1:4300").rstrip("/")
 TOKEN = os.environ.get("MB_API_TOKEN", "")
@@ -67,7 +67,7 @@ def tool_remember(args: dict) -> dict:
         "payload": {"text": text},
         "importance": args.get("importance"),
         "event_id": str(uuid.uuid4()),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
     body = {k: v for k, v in body.items() if v is not None}
     try:
