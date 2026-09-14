@@ -198,6 +198,22 @@ class Postgres:
             self._upsert_memory_item(cur, project_id, kind, content, ev)
 
         if project_id:
+            # Mark only meaningful prose/operational events for asynchronous
+            # consolidation. Structured explicit events are already derived.
+            if et in {"USER_MESSAGE", "ASSISTANT_MESSAGE", "ERROR", "TEST_RESULT", "FILE_WRITE", "SHELL_RESULT"}:
+                payload_text = str(payload.get("text") or payload.get("content") or "").strip() if isinstance(payload, dict) else ""
+                if len(payload_text) >= 12:
+                    cur.execute(
+                        """INSERT INTO consolidation_projects
+                           (project_id, first_dirty_at, last_dirty_at, pending_event_count, next_eligible_at)
+                           VALUES (%s, now(), now(), 1, now() + interval '15 minutes')
+                           ON CONFLICT (project_id) DO UPDATE SET
+                             last_dirty_at=now(),
+                             pending_event_count=consolidation_projects.pending_event_count + 1,
+                             next_eligible_at=now() + interval '15 minutes',
+                             updated_at=now()""",
+                        (project_id,),
+                    )
             return self._bump_revision(cur, project_id, ev["event_id"])
         return None
 

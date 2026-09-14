@@ -1,4 +1,7 @@
-# Changelog
+## [0.1.1] - 2026-09-14
+
+- Added durable batched consolidation scheduler with debounce, watermark, idempotency, and PostgreSQL-backed rate/cost guards.
+- Consolidation uses Router `main-auto` with `SUMMARIZE` / `CHEAPEST` semantics; no pinned model.
 
 ## 0.1.0 - Initial public release
 

@@ -19,8 +19,7 @@ sys.path.insert(0, str(ROOT))
 from consolidation.worker import ConsolidationWorker
 
 LOCK = Path(os.environ.get("MB_STATE_DIR") or (ROOT / "state")) / "consolidation-worker.lock"
-SLEEP_S = float(os.environ.get("MB_CONSOLIDATION_SLEEP_S", "60.0"))
-SLEEP_IDLE_S = float(os.environ.get("MB_CONSOLIDATION_IDLE_SLEEP_S", "300.0"))
+SLEEP_S = float(os.environ.get("MB_CONSOLIDATION_TICK_S", "60.0"))
 
 _stop = False
 
@@ -44,14 +43,10 @@ def main() -> int:
     print(f"consolidation worker started (model={worker.__class__.__module__})", flush=True)
     while not _stop:
         try:
-            res = worker.run_once()
+            worker.run_once()
         except Exception as e:  # noqa: BLE001
             print(f"run_once error: {str(e)[:200]}", flush=True)
-            res = {"status": "error"}
-        if res.get("status") == "idle":
-            time.sleep(SLEEP_IDLE_S)
-        else:
-            time.sleep(SLEEP_S)
+        time.sleep(SLEEP_S)
     print("consolidation worker stopped", flush=True)
     return 0
 
