@@ -2,7 +2,9 @@
 
 MegaBrain is a standalone durable-memory service for AI agents. It exposes a REST API and keeps immutable raw events in PostgreSQL. Redis is an optional HOT cache; pgvector and embeddings are derived indexes.
 
-Version: 0.1.0
+Version: 0.1.2
+
+*(Russian: см. [README.ru.md](README.ru.md))*
 
 ## Capabilities
 
