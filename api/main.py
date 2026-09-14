@@ -6,20 +6,23 @@ Failure semantics:
 """
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Security
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from core.config import load_config
 from core.hot import L0RAM, L1Redis, Telemetry
+from operations import dead_letter_stats, outbox_counts, scheduler_backlog, unit_state, worker_rows
 from projects.resolver import ProjectResolver
 from retrieval.capsule import CapsuleBuilder
 from storage.pg import BlobStore, Postgres
 
-VERSION = "0.1.0"
+VERSION = "0.1.2"
 
 app = FastAPI(title="MegaBrain", version=VERSION)
 bearer = HTTPBearer(auto_error=False)
@@ -116,19 +119,80 @@ class ContextIn(BaseModel):
 
 # ---------- infra endpoints ----------
 
+@app.get("/health/live")
+async def health_live():
+    return {"status": "ok", "version": VERSION}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    try:
+        with STATE["pg"].conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.execute("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1")
+            migration = cur.fetchone()[0]
+        return {"status": "ok", "postgres": True, "schema_version": migration, "redis": STATE["redis"].ping()}
+    except Exception as error:
+        return JSONResponse(status_code=503, content={"status":"error","error_class":type(error).__name__})
+
+
+@app.get("/health/ops")
+async def health_ops():
+    try:
+        workers = worker_rows(STATE["pg"])
+        services = {"embedding": unit_state("megabrain-embedding-worker.service"), "outbox": unit_state("megabrain-hermes-outbox.service"), "consolidation": unit_state("megabrain-consolidation-worker.service")}
+        outbox_path = os.environ.get("MB_OUTBOX_PATH", "~/.hermes/megabrain-outbox.db")
+        outbox = outbox_counts(outbox_path)
+        dlq = dead_letter_stats(outbox_path)
+        backlog = scheduler_backlog(STATE["pg"])
+        required = {"embedding", "consolidation"}
+        degraded = [f"worker:{key}:missing" for key in required if key not in workers]
+        degraded.extend(f"worker:{key}:{value['health']}" for key, value in workers.items() if value["health"] != "OK")
+        degraded.extend(f"service:{key}" for key, value in services.items() if value not in {"active", "activating", "inactive-ack"})
+        # Progress watchdog (§7-8): backlog beyond ABS_MAX_WAIT with no valid wait reason = STUCK.
+        if backlog["overdue"]:
+            degraded.append("consolidation:stalled_backlog")
+        # Acknowledged historical permanent dead letters do not hold ERROR forever;
+        # only OPEN letters or a rapid DLQ growth do (§10).
+        if dlq.get("open", 0) > 0:
+            degraded.append("dead_letter:open")
+        if dlq.get("new_24h", 0) > 10:
+            degraded.append("dead_letter:growth")
+        throttled = [key for key, value in workers.items() if value.get("state") == "MEMORY_QUALITY_THROTTLED"]
+        degraded.extend(f"memory_quality_throttled:{key}" for key in throttled)
+        state = "ERROR" if any(value["health"] == "ERROR" for key, value in workers.items() if key in required) or backlog["overdue"] else "DEGRADED" if degraded else "OK"
+        return {"status": state, "version": VERSION, "workers": workers, "services": services,
+                "outbox": outbox, "dead_letters": dlq, "scheduler": backlog, "reasons": sorted(set(degraded))}
+    except Exception as error:
+        return JSONResponse(status_code=503, content={"status": "ERROR", "error_class": type(error).__name__})
+
+
+class HeartbeatIn(BaseModel):
+    component: str
+    state: str = "RUNNING"
+    processed_items: int = 0
+    success: bool = False
+    error_class: str | None = None
+    detail: str | None = None
+
+
+@app.post("/v1/worker/heartbeat")
+async def worker_heartbeat(body: HeartbeatIn, _=Depends(require_auth)):
+    """Durable heartbeat for components without direct DB access (outbox sender)."""
+    from operations import WorkerHeartbeat
+
+    error = RuntimeError(body.error_class) if body.error_class else None
+    ok = WorkerHeartbeat(body.component).update(state=body.state, processed_items=body.processed_items,
+                                                success=body.success, error=error, detail=body.detail)
+    return {"ok": ok}
+
 @app.get("/health")
 async def health():
     st = STATE
     pg_ok = st["pg"].ping()
     redis_ok = st["redis"].ping()
-    if pg_ok and redis_ok:
-        mode = "OK"
-    elif pg_ok:
-        mode = "DEGRADED"
-    else:
-        mode = "DB_DOWN"
-    return {"status": "ok" if pg_ok else "error", "postgres": pg_ok,
-            "redis": redis_ok, "mode": mode, "version": VERSION}
+    mode = "OK" if pg_ok and redis_ok else "DEGRADED" if pg_ok else "DB_DOWN"
+    return {"status": "ok" if pg_ok else "error", "postgres": pg_ok, "redis": redis_ok, "mode": mode, "version": VERSION}
 
 
 @app.get("/version")

@@ -7,8 +7,9 @@ NOTE: this is an ad-hoc reconstruction check, not a suite.
 """
 import json
 import sys
+from pathlib import Path
 
-sys.path.insert(0, "/home/sanchos/megabrain")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import psycopg

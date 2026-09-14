@@ -52,6 +52,7 @@ class Outbox:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(SCHEMA)
+        self._migrate_dlq()
         self._conn.commit()
 
     def append(self, event: dict) -> bool:
@@ -87,6 +88,65 @@ class Outbox:
     def dead_letter_count(self) -> int:
         with self._lock:
             return self._conn.execute("SELECT count(*) FROM dead_letters").fetchone()[0]
+
+    # -- dead-letter lifecycle (0.1.2): OPEN -> ACKNOWLEDGED | REPLAYED -> RESOLVED
+    def _migrate_dlq(self) -> None:
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(dead_letters)")}
+        for column in ("state", "acknowledged_at", "resolution", "replayed_at"):
+            if column not in cols:
+                default = "'OPEN'" if column == "state" else "NULL"
+                self._conn.execute(f"ALTER TABLE dead_letters ADD COLUMN {column} TEXT DEFAULT {default}")
+        self._conn.commit()
+
+    def acknowledge(self, event_id: str, resolution: str = "historical_permanent") -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE dead_letters SET state='ACKNOWLEDGED', acknowledged_at=?, resolution=? "
+                "WHERE event_id=? AND state='OPEN'", (time.time(), resolution, event_id))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def replay(self, event_id: str) -> bool:
+        """Explicit replay only: requeue the payload and mark REPLAYED."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload FROM dead_letters WHERE event_id=?", (event_id,)).fetchone()
+            if not row:
+                return False
+            self._conn.execute(
+                "INSERT OR REPLACE INTO outbox (event_id,payload,created_at,attempts,next_retry,status) "
+                "VALUES (?,?,?,0,0,'pending')", (event_id, row[0], time.time()))
+            self._conn.execute(
+                "UPDATE dead_letters SET state='REPLAYED', replayed_at=? WHERE event_id=?",
+                (time.time(), event_id))
+            self._conn.commit()
+            return True
+
+    def resolve(self, event_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE dead_letters SET state='RESOLVED' WHERE event_id=?", (event_id,))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def dead_letter_stats(self) -> dict:
+        now = time.time()
+        with self._lock:
+            states = dict(self._conn.execute(
+                "SELECT COALESCE(state,'OPEN'), count(*) FROM dead_letters GROUP BY 1").fetchall())
+            reasons = {f"{s}:{r}": n for s, r, n in self._conn.execute(
+                "SELECT COALESCE(state,'OPEN'), reason, count(*) FROM dead_letters GROUP BY 1,2")}
+            return {
+                "total": sum(states.values()), "open": states.get("OPEN", 0),
+                "acknowledged": states.get("ACKNOWLEDGED", 0), "replayed": states.get("REPLAYED", 0),
+                "resolved": states.get("RESOLVED", 0),
+                "new_24h": self._conn.execute(
+                    "SELECT count(*) FROM dead_letters WHERE failed_at>=? AND COALESCE(state,'OPEN') IN ('OPEN','REPLAYED')",
+                    (now - 86400,)).fetchone()[0],
+                "new_7d": self._conn.execute(
+                    "SELECT count(*) FROM dead_letters WHERE failed_at>=? AND COALESCE(state,'OPEN') IN ('OPEN','REPLAYED')",
+                    (now - 7 * 86400,)).fetchone()[0],
+                "reasons": reasons}
 
     def dead_letters(self) -> list[dict]:
         with self._lock:

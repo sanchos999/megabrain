@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from datetime import datetime
 
 _TRACE_PATH = ""
@@ -41,12 +42,42 @@ logger = logging.getLogger("megabrain.sender")
 
 class Sender:
     def __init__(self, client: MegaBrainClient, outbox: Outbox,
-                 batch_size: int = 50):
+                 batch_size: int = 50, heartbeat_interval_s: float = 30.0):
         self.client = client
         self.outbox = outbox
         self.batch_size = batch_size
+        self.heartbeat_interval_s = heartbeat_interval_s
+        self._processed = 0
+        self._last_error_class: str | None = None
+        self._last_heartbeat = 0.0
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+
+    def _heartbeat(self, state: str) -> None:
+        """Durable heartbeat via MegaBrain API (never blocks delivery on failure)."""
+        if time.time() - self._last_heartbeat < self.heartbeat_interval_s:
+            return
+        self._last_heartbeat = time.time()
+        try:
+            self.client.worker_heartbeat(
+                component="outbox", state=state, processed_items=self._processed,
+                success=self._last_error_class is None, error_class=self._last_error_class)
+            self._last_error_class = None
+        except Exception:  # noqa: BLE001 — heartbeat must never kill delivery
+            pass
+
+    def _heartbeat(self, state: str) -> None:
+        """Durable heartbeat via MegaBrain API (never blocks delivery on failure)."""
+        if time.time() - self._last_heartbeat < self.heartbeat_interval_s:
+            return
+        self._last_heartbeat = time.time()
+        try:
+            self.client.worker_heartbeat(
+                component="outbox", state=state, processed_items=self._processed,
+                success=self._last_error_class is None, error_class=self._last_error_class)
+            self._last_error_class = None
+        except Exception:  # noqa: BLE001 — heartbeat must never kill delivery
+            pass
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -82,6 +113,7 @@ class Sender:
                         logger.warning("dead-lettered %s: %s", eid, e)
                         continue
                     self.outbox.mark_failed(eid)
+                    self._last_error_class = type(e).__name__
                     _trace("sender_failed", session_id=event.get("session_id"), event_type=event.get("event_type"), outbox_action="failed", status=type(e).__name__)
                     logger.warning("delivery failed %s: %s", eid, e)
                     # stop draining on connectivity failure; retry later
@@ -94,6 +126,10 @@ class Sender:
     def _run(self) -> None:
         while not self._stop.is_set():
             n = self.flush_once()
+            self._processed += n
+            counts = self.outbox.counts()
+            queued = counts.get("pending", 0) + counts.get("failed", 0)
+            self._heartbeat("RUNNING" if queued else "IDLE")
             if n == 0:
                 # idle: sleep a bit; pending rows with backoff will retry later
-                self._stop.wait(2.0)
+                self._stop.wait(2.0 if queued else 30.0)
