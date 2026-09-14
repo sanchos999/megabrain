@@ -1,4 +1,9 @@
-## [0.1.1] - 2026-09-14
+## [0.1.2] - 2026-09-14
+
+- Added liveness/readiness/operational health endpoints.
+- Added durable worker heartbeats and stale-worker visibility.
+- Added explicit unknown token/cost accounting semantics.
+
 
 - Added durable batched consolidation scheduler with debounce, watermark, idempotency, and PostgreSQL-backed rate/cost guards.
 - Consolidation uses Router `main-auto` with `SUMMARIZE` / `CHEAPEST` semantics; no pinned model.

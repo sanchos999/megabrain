@@ -13,6 +13,7 @@ Event types captured (M5 Section 5):
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime
 
 SOURCE = "hermes"
@@ -23,7 +24,8 @@ def _now() -> str:
 
 
 def _event_id(event_type: str, session_id: str, *parts: str) -> str:
-    raw = "|".join([event_type, session_id, *parts])
+    # Hash complete canonical inputs; truncated previews caused payload collisions.
+    raw = json.dumps([event_type, session_id, *parts], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "mb_" + hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
@@ -54,7 +56,7 @@ def base(event_type: str, session_id: str, *, payload: dict | None = None,
 
 def user_message(session_id: str, text: str, *, project_id=None, turn_id=None,
                  channel="cli") -> dict:
-    eid = _event_id("USER_MESSAGE", session_id, text[:200])
+    eid = _event_id("USER_MESSAGE", session_id, text)
     return base("USER_MESSAGE", session_id, payload={"text": text},
                 project_id=project_id, turn_id=turn_id, channel=channel,
                 event_id=eid)
@@ -63,7 +65,7 @@ def user_message(session_id: str, text: str, *, project_id=None, turn_id=None,
 def assistant_message(session_id: str, text: str, *, project_id=None,
                       turn_id=None, channel="cli", model=None,
                       route=None) -> dict:
-    eid = _event_id("ASSISTANT_MESSAGE", session_id, text[:200])
+    eid = _event_id("ASSISTANT_MESSAGE", session_id, text)
     return base("ASSISTANT_MESSAGE", session_id, payload={"text": text},
                 project_id=project_id, turn_id=turn_id, channel=channel,
                 event_id=eid)
@@ -71,7 +73,7 @@ def assistant_message(session_id: str, text: str, *, project_id=None,
 
 def tool_call(session_id: str, tool_name: str, args: dict, *, project_id=None,
               turn_id=None, channel="cli") -> dict:
-    eid = _event_id("TOOL_CALL", session_id, tool_name, str(args)[:200])
+    eid = _event_id("TOOL_CALL", session_id, tool_name, json.dumps(args,ensure_ascii=False,sort_keys=True,separators=(",", ":")))
     return base("TOOL_CALL", session_id, turn_id=turn_id, channel=channel,
                 project_id=project_id, event_id=eid,
                 payload={"tool": tool_name, "args": args})
@@ -79,7 +81,7 @@ def tool_call(session_id: str, tool_name: str, args: dict, *, project_id=None,
 
 def tool_result(session_id: str, tool_name: str, result: str, *, project_id=None,
                 turn_id=None, channel="cli", is_error=False) -> dict:
-    eid = _event_id("TOOL_RESULT", session_id, tool_name, result[:200])
+    eid = _event_id("TOOL_RESULT", session_id, tool_name, result)
     return base("TOOL_RESULT", session_id, turn_id=turn_id, channel=channel,
                 project_id=project_id, event_id=eid,
                 payload={"tool": tool_name, "result": result,
@@ -88,7 +90,7 @@ def tool_result(session_id: str, tool_name: str, result: str, *, project_id=None
 
 def shell_command(session_id: str, command: str, *, project_id=None,
                   turn_id=None, channel="cli") -> dict:
-    eid = _event_id("SHELL_COMMAND", session_id, command[:300])
+    eid = _event_id("SHELL_COMMAND", session_id, command)
     return base("SHELL_COMMAND", session_id, turn_id=turn_id, channel=channel,
                 project_id=project_id, event_id=eid,
                 payload={"command": command})
@@ -96,7 +98,7 @@ def shell_command(session_id: str, command: str, *, project_id=None,
 
 def shell_result(session_id: str, command: str, output: str, exit_code: int,
                  *, project_id=None, turn_id=None, channel="cli") -> dict:
-    eid = _event_id("SHELL_RESULT", session_id, command[:300], str(exit_code))
+    eid = _event_id("SHELL_RESULT", session_id, command, str(exit_code))
     return base("SHELL_RESULT", session_id, turn_id=turn_id, channel=channel,
                 project_id=project_id, event_id=eid,
                 payload={"command": command, "output": output,
@@ -119,7 +121,7 @@ def file_read(session_id: str, path: str, *, project_id=None, turn_id=None,
 
 def error(session_id: str, message: str, *, project_id=None, turn_id=None,
           channel="cli", context=None) -> dict:
-    eid = _event_id("ERROR", session_id, message[:200])
+    eid = _event_id("ERROR", session_id, message)
     return base("ERROR", session_id, turn_id=turn_id, channel=channel,
                 project_id=project_id, event_id=eid,
                 payload={"message": message, "context": context})

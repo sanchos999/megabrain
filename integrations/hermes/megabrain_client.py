@@ -61,6 +61,13 @@ class MegaBrainClient:
     def write_batch(self, events: list[dict]) -> dict:
         return self._request("POST", "/v1/events/batch", {"events": events})
 
+    def worker_heartbeat(self, *, component: str, state: str = "RUNNING",
+                         processed_items: int = 0, success: bool = False,
+                         error_class: str | None = None, detail: str | None = None) -> dict:
+        return self._request("POST", "/v1/worker/heartbeat", {
+            "component": component, "state": state, "processed_items": processed_items,
+            "success": success, "error_class": error_class, "detail": detail})
+
     # -- reads --------------------------------------------------------------
 
     def health(self) -> dict:

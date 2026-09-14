@@ -367,7 +367,8 @@ class Postgres:
                          extractor: str = "LLM",
                          extractor_version: str = "megabrain-m5",
                          created_at: str | None = None,
-                         status: str = "CANDIDATE") -> dict | None:
+                         status: str = "CANDIDATE",
+                         commit: bool = True) -> dict | None:
         """Insert an LLM/derived memory item with provenance (consolidation worker).
 
         Idempotent by (project_id, kind, item_key): a currently-valid item with
@@ -410,7 +411,8 @@ class Postgres:
             if supersedes:
                 cur.execute("UPDATE memory_items SET valid_to=%s WHERE item_id=%s",
                             (created_at, supersedes))
-            self.conn.commit()
+            if commit:
+                self.conn.commit()
         return {"item_id": item_id, "superseded": supersedes}
     def recent_events(self, project_id: str, limit: int = 20,
                       types=None) -> list[dict]:

@@ -7,7 +7,21 @@ from consolidation.worker import ConsolidationWorker, Settings
 
 
 class FakePG:
-    def __init__(self): self.items=[]
+    def __init__(self): self.items=[]; self.rollback=False
+    class _Conn:
+        def __init__(self, pg): self.pg=pg
+        def transaction(self):
+            import contextlib
+            @contextlib.contextmanager
+            def ctx():
+                if self.pg.rollback:
+                    raise RuntimeError("simulated_db_failure")
+                yield
+            return ctx()
+        def commit(self): pass
+        def rollback(self): self.pg.rolled_back=True
+    @property
+    def conn(self): return FakePG._Conn(self)
     def add_derived_item(self, project, kind, content, source_ids, **kwargs):
         key=(project,kind,content.get("title"),tuple(source_ids))
         if key in {(x[0],x[1],x[2],tuple(x[3])) for x in self.items}: return None
@@ -25,6 +39,8 @@ class FakeRepo:
         return [project for project, data in self.projects.items() if not data["paused"] and data["next"] <= datetime.now(UTC) and (len(data["events"]) >= 20 or (datetime.now(UTC)-data["first"]).total_seconds() >= 1800)]
 
     def events(self, project): return list(self.projects[project]["events"])
+    def explicit_source_ids(self, project): return set()
+    def daily_input_tokens_used(self): return 0
 
     def budget(self): return 0.0,0.0
     def duplicate(self, project, digest): return any(r[0]==project and r[1]==digest for r in self.runs)
@@ -35,7 +51,7 @@ class FakeRepo:
         for i,r in enumerate(self.runs):
             if r[0]==project and r[1]==digest: self.runs[i]=(project,digest,status,values); return
         self.runs.append((project,digest,status,values))
-    def success(self, project, events):
+    def success(self, project, events, *, commit=True):
         self.projects[project]["events"]=self.projects[project]["events"][len(events):]
         self.projects[project]["first"]=datetime.now(UTC); self.projects[project]["next"]=datetime.now(UTC)+timedelta(seconds=900)
     def failure(self, project, error, retry): self.projects[project]["next"]=datetime.now(UTC)+timedelta(seconds=60)
@@ -49,9 +65,10 @@ def repo(*projects,age_minutes=0,count=1):
 class FakeTransport:
     def __init__(self,fail=None): self.requests=[]; self.fail=fail
     def __call__(self,body):
+        import re
         self.requests.append(body)
         if self.fail: raise self.fail
-        source=body["messages"][0]["content"].split("[")[1].split("]")[0]
+        source=re.search(r"\[(evt_[^\]]+)\]",body["messages"][0]["content"]).group(1)
         content='{"items":[{"kind":"EXPERIENCE","title":"lesson","confidence":0.8,"source_event_ids":["'+source+'"]}]}'
         return ({"choices":[{"message":{"content":content}}]},{"x-gateway-selected-slug":"cheap-summary","x-gateway-selected-provider":"inferhub"},{"prompt_tokens":100,"completion_tokens":20})
 
