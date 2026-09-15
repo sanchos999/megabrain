@@ -429,7 +429,8 @@ class ConsolidationWorker:
         request = urllib.request.Request(
             ROUTER_URL + "/v1/chat/completions",
             data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json", "x-hermes-task-class": TASK_CLASS},
+            headers={"Content-Type": "application/json", "x-hermes-task-class": TASK_CLASS,
+                     "x-gateway-client": "megabrain"},
             method="POST",
         )
         if ROUTER_API_KEY:
