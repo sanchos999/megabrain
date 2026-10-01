@@ -26,7 +26,7 @@ ABS_MAX_WAIT_S = int(os.environ.get("MB_CONSOLIDATION_ABS_MAX_WAIT_S", "86400"))
 
 
 class WorkerHeartbeat:
-    def __init__(self, component: str, version: str = "0.1.2", dsn: str | None = None):
+    def __init__(self, component: str, version: str = "0.2.0", dsn: str | None = None):
         self.component, self.version = component, version
         self.dsn = dsn or load_config()["postgres_dsn"]
         self.instance_id = _INSTANCE

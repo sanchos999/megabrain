@@ -5,7 +5,8 @@ Production memory retrieval: POST /v1/memory/search
 ## Stack
 
 - HOT: RAM + Redis structured state (Context Capsule)
-- WARM: PostgreSQL FTS + pgvector + RRF(k=60) + temporal validation
+- WARM: canonical memory-items + raw evidence, PostgreSQL FTS + pgvector,
+  weighted RRF(k=60) + temporal validation
 - DEEP: то же WARM, broad cross-session/history, без session-сужения,
   увеличенный top-N
 
@@ -37,7 +38,8 @@ Explicit mode от клиента имеет приоритет.
 
 event_id, session_id, project_id, event_type, source, created_at, text,
 score, rank, retrieval_source (FTS|VECTOR|BOTH), valid_from, valid_to,
-superseded.
+superseded. Canonical results additionally include `memory_item_id`,
+`memory_kind`, `source_event_ids` and `confidence`.
 
 Факт без source provenance не отдаётся.
 
@@ -62,19 +64,19 @@ Supersession: memory_items.supersedes_id + valid_to; item_key
 | Embedding worker down | existing vectors работают, новые events через FTS |
 | Redis down | PG fallback, mode=DEGRADED (M1) |
 
-## Performance (production, 2026-09-11, во время backfill)
+## Performance (production, 2026-10-01, after v4 backfill)
 
 | Path | p50 | p95 |
 |---|---|---|
 | HOT capsule | 3.8 ms | 4.4 ms |
 | WARM FTS-only | 15.7 ms | 17.0 ms |
-| WARM hybrid | 334 ms | 387 ms |
+| WARM hybrid, unique queries | 254 ms | 270 ms |
+| DEEP hybrid, unique queries | 257 ms | 259 ms |
 | Context Capsule | 3.5 ms | 5.8 ms |
 
-Hybrid latency доминируется CPU-embedding запроса (BGE-M3 int8, 512 tokens)
-конкурирующим с backfill worker'ом; после завершения backfill ожидается
-снижение. Correctness приоритет (spec: не FAIL из-за превышения при
-корректной работе).
+Замер выполнен после завершения backfill, построения HNSW и prewarm локальной
+модели; 20 уникальных запросов, CPU ONNX INT8, one-text inference и bounded
+query cache. Это одно production-развёртывание, а не SLA.
 
 ## Context Capsule integration
 
