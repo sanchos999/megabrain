@@ -253,6 +253,11 @@ class Postgres:
             "UPDATE projects SET revision=revision+1, updated_at=now() WHERE project_id=%s RETURNING revision",
             (project_id,))
         rev = cur.fetchone()[0]
+        # Store the exact project boundary on the immutable event. This makes
+        # Context Capsule deltas deterministic instead of using time/order as
+        # an approximation.
+        cur.execute("UPDATE events SET project_revision=%s WHERE event_id=%s",
+                    (rev, event_id))
         return rev
 
     # ---------------- reads ----------------
@@ -429,6 +434,25 @@ class Postgres:
                        FROM events WHERE project_id=%s
                        ORDER BY created_at DESC LIMIT %s""",
                     (project_id, limit))
+            rows = cur.fetchall()
+            cols = [d.name for d in cur.description]
+            self.conn.commit()
+        return [dict(zip(cols, r)) for r in rows]
+
+    def recent_events_since_revision(self, project_id: str, since_revision: int,
+                                     limit: int = 20, types=None) -> list[dict]:
+        """Return events after an exact project revision boundary."""
+        with self.conn.cursor() as cur:
+            conditions = ["project_id=%s", "project_revision > %s"]
+            args = [project_id, since_revision]
+            if types:
+                conditions.append("event_type = ANY(%s)")
+                args.append(types)
+            cur.execute(
+                f"""SELECT event_id, event_type, created_at, payload, project_revision
+                    FROM events WHERE {' AND '.join(conditions)}
+                    ORDER BY project_revision ASC LIMIT %s""",
+                (*args, limit))
             rows = cur.fetchall()
             cols = [d.name for d in cur.description]
             self.conn.commit()

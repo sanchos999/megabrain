@@ -19,6 +19,14 @@ DEFAULTS = {
     "capsule_default_token_budget": 2000,
     "max_recent_events": 20,
     "resolver_recent_projects": 5,
+    "hot_cache_max_projects": 128,
+    "hot_cache_ttl_s": 1800,
+    "retrieval_db_connect_timeout_s": 5,
+    "retrieval_vector_candidates": 60,
+    "retrieval_item_candidates": 40,
+    "retrieval_query_cache_max": 256,
+    "retrieval_query_cache_ttl_s": 300,
+    "onnx_threads": 2,
 }
 
 

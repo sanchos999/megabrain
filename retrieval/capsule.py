@@ -94,22 +94,25 @@ class CapsuleBuilder:
         # recent significant events (exclude turn bookkeeping)
         sig_types = ["DECISION", "CONSTRAINT", "TASK_UPDATE", "ERROR", "TEST_RESULT",
                      "FILE_WRITE", "ASSISTANT_MESSAGE"]
-        recent = self.pg.recent_events(project_id, limit=self.cfg.get("max_recent_events", 20),
-                                       types=sig_types)
+        if since_revision is None:
+            recent = self.pg.recent_events(project_id,
+                                           limit=self.cfg.get("max_recent_events", 20),
+                                           types=sig_types)
+        else:
+            recent = self.pg.recent_events_since_revision(
+                project_id, since_revision,
+                limit=self.cfg.get("max_recent_events", 20), types=sig_types)
+        recent_rows = recent if since_revision is not None else reversed(recent)
         recent_changes = [
             {"event_id": r["event_id"], "event_type": r["event_type"],
              "created_at": r["created_at"], "payload": r["payload"]}
-            for r in reversed(recent)
+            for r in recent_rows
         ]
         failures = self.pg.recent_events(project_id, limit=10, types=["ERROR"])
 
-        # delta: only events after since_revision boundary (project revision increments per event)
+        # Delta is now selected by the exact project_revision written on each
+        # event. No timestamp or "recent N" approximation is used.
         delta_changes = recent_changes
-        if since_revision is not None:
-            # events are appended in order; use project revision numbering as proxy
-            proj_rev = proj.get("revision") or 0
-            if proj_rev <= since_revision:
-                delta_changes = []
 
         section_payloads = {
             "constraints": constraints,

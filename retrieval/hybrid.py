@@ -1,50 +1,56 @@
-"""M4 production hybrid retrieval: FTS + pgvector + RRF + temporal validation.
+"""Production hybrid retrieval over canonical memory and raw evidence.
 
-Layers:
-  HOT   - structured current state (caller: capsule / hot memory; not here)
-  WARM  - PostgreSQL FTS top-N + pgvector top-N -> RRF(k=60) -> structural
-          filters (project/session) -> temporal validation
-  DEEP  - same as WARM with broader scope (no session narrowing, larger N,
-          temporal/provenance expansion)
-
-Design rules (M4 spec):
-  - vector absence never breaks retrieval: pgvector errors -> FTS-only
-  - similarity never decides current truth: after retrieval, superseded
-    memory items are excluded/demoted via valid_from/valid_to/supersedes
-  - every result carries full provenance
-  - deterministic mode selector, no LLM
+The canonical ``memory_items`` leg is the answer-oriented index: decisions,
+constraints, tasks, facts and consolidated experience. Raw events remain a
+lossless evidence/fallback leg. Both legs use FTS + pgvector and are merged by
+weighted reciprocal rank, then checked against temporal validity.
 """
 from __future__ import annotations
 
+import threading
 import time
+from collections import OrderedDict
+from typing import Any
 
-import numpy as np
 import psycopg
 
+from benchmark.onnx_embed import EMBEDDING_MODEL_VERSION
 from core.config import load_config
 
 RRF_K = 60
-EMBEDDING_MODEL_VERSION = "xenova-bge-m3-onnx-int8-512"
 EMBEDDING_MODEL = "bge-m3-int8-onnx"
 EMBEDDING_DIM = 1024
 MAX_DOC_CHARS = 4000
 MAX_LEN = 512
+ITEM_WEIGHT = 1.35
+
+# key, event_id, item_id, session_id, project_id, event_type, source,
+# created_at, text, source_event_ids, confidence, valid_from, valid_to,
+# superseded
+Row = tuple[Any, ...]
 
 
 # ---------- deterministic mode selector (no LLM) ----------
 
-_HOT_MARKERS = ("продолжаем", "продолжить", "дальше", "что осталось", "что дальше",
-                "продолжи", "продолжаем?", "итог", "статус")
-_WARM_MARKERS = ("что мы решили", "где обсуждали", "какая была ошибка", "какую ошибку",
-                 "что решили", "кто решил", "решение по", "ошибка была",
-                 "конкретная ошибка", "столкнулись с ошибкой")
-_DEEP_MARKERS = ("за всю историю", "в других проектах", "как связано",
-                 "что раньше делали", "раньше делали", "всё время", "вся история",
-                 "похожие случаи", "когда-либо")
+_HOT_MARKERS = (
+    "продолжаем", "продолжить", "дальше", "что осталось", "что дальше",
+    "продолжи", "продолжаем?", "итог", "статус",
+)
+_WARM_MARKERS = (
+    "что мы решили", "где обсуждали", "какая была ошибка", "какую ошибку",
+    "что решили", "кто решил", "решение по", "ошибка была",
+    "конкретная ошибка", "столкнулись с ошибкой", "какое решение",
+    "какие ограничения", "что зафиксировали", "почему выбрали",
+)
+_DEEP_MARKERS = (
+    "за всю историю", "в других проектах", "как связано", "что раньше делали",
+    "раньше делали", "всё время", "вся история", "похожие случаи",
+    "когда-либо", "сравни с прошлым", "аналогичные случаи",
+)
 
 
 def select_mode(query: str, explicit: str | None = None) -> str:
-    """Explicit client mode wins; otherwise deterministic keyword rules."""
+    """Explicit client mode wins; otherwise deterministic intent rules apply."""
     if explicit:
         if explicit not in ("NONE", "HOT", "WARM", "DEEP"):
             raise ValueError(f"invalid mode: {explicit}")
@@ -59,112 +65,235 @@ def select_mode(query: str, explicit: str | None = None) -> str:
     return "WARM"
 
 
-# ---------- retrieval ----------
-
 class HybridRetriever:
-    """WARM/DEEP retrieval over production megabrain DB."""
-
-    def __init__(self, cfg: dict | None = None):
-        self.cfg = cfg or load_config()
-        self._embedder = None  # lazy: model loaded only when vector leg runs
-
-    # --- vector leg -----------------------------------------------------
-
-    def _encode_query(self, query: str) -> list[float] | None:
-        try:
-            if self._embedder is None:
-                from benchmark.onnx_embed import OnnxBgeM3
-                self._embedder = OnnxBgeM3()
-            v = self._encode_once(query)
-            if v is None:
-                return None
-            return v
-        except Exception:
-            return None  # vector absence must not break retrieval
-
-    def _encode_once(self, query: str) -> np.ndarray | None:
-        v = self._embedder.encode([query[:MAX_DOC_CHARS]], max_length=MAX_LEN)
-        if v is None or len(v) == 0:
-            return None
-        return v[0]
-
-    # --- SQL legs -------------------------------------------------------
+    """WARM/DEEP retrieval with bounded local model and DB connections."""
 
     FTS_SQL = """
-        select e.event_id, e.session_id, e.project_id, e.event_type, e.source,
-               e.created_at, e.payload->>'text' as text
+        select e.event_id as key, e.event_id, null::text as item_id,
+               e.session_id, e.project_id, e.event_type, e.source,
+               e.created_at, e.payload->>'text' as text,
+               null::text[] as source_event_ids, null::real as confidence,
+               null::timestamptz as valid_from, null::timestamptz as valid_to,
+               false as superseded
         from events e
         where e.fts @@ websearch_to_tsquery('simple', %(q)s)
           and length(trim(coalesce(e.payload->>'text',''))) > 0
     """
 
     VEC_SQL = """
-        select e.event_id, e.session_id, e.project_id, e.event_type, e.source,
-               e.created_at, e.payload->>'text' as text
+        select e.event_id as key, e.event_id, null::text as item_id,
+               e.session_id, e.project_id, e.event_type, e.source,
+               e.created_at, e.payload->>'text' as text,
+               null::text[] as source_event_ids, null::real as confidence,
+               null::timestamptz as valid_from, null::timestamptz as valid_to,
+               false as superseded
         from memory_embeddings me
         join events e on e.event_id = me.event_id
         where me.model_version = %(mv)s and me.dimension = %(dim)s
+          and (%(project_id)s::text is null or me.project_id = %(project_id)s or me.project_id is null)
           and me.embedding <=> %(vec)s::vector < 0.98
     """
 
-    def _structural_where(self, deep: bool, project_id: str | None,
-                          session_id: str | None) -> tuple[str, dict]:
+    ITEM_TEXT = """concat_ws(' ', mi.kind,
+        nullif(mi.content->>'title', ''),
+        nullif(mi.content->>'summary', ''),
+        nullif(mi.content->>'text', ''),
+        nullif(mi.content->>'content', ''),
+        nullif(mi.content->>'situation', ''),
+        nullif(mi.content->>'lesson', ''),
+        nullif(mi.content->>'rationale', ''),
+        nullif(mi.content->>'reason', ''),
+        nullif(mi.content->>'cause', ''),
+        nullif(mi.content->>'effect', ''),
+        nullif(mi.content->>'outcome', ''),
+        nullif(mi.content->>'result', ''),
+        nullif(mi.content->>'recommendation', ''),
+        nullif(mi.content->>'action', ''),
+        nullif(mi.content->>'description', ''))"""
+
+    ITEM_FTS_SQL = f"""
+        select 'item:' || mi.item_id as key,
+               coalesce(mi.source_event_ids[1], 'memory_item:' || mi.item_id) as event_id,
+               mi.item_id, null::text as session_id, mi.project_id,
+               'MEMORY_ITEM' as event_type, mi.kind as source,
+               mi.valid_from as created_at, {ITEM_TEXT} as text,
+               mi.source_event_ids, mi.confidence, mi.valid_from, mi.valid_to,
+               (mi.valid_to is not null) as superseded
+        from memory_items mi
+        where to_tsvector('simple', mi.content::text) @@ websearch_to_tsquery('simple', %(q)s)
+    """
+
+    ITEM_VEC_SQL = f"""
+        select 'item:' || mi.item_id as key,
+               coalesce(mi.source_event_ids[1], 'memory_item:' || mi.item_id) as event_id,
+               mi.item_id, null::text as session_id, mi.project_id,
+               'MEMORY_ITEM' as event_type, mi.kind as source,
+               mi.valid_from as created_at, {ITEM_TEXT} as text,
+               mi.source_event_ids, mi.confidence, mi.valid_from, mi.valid_to,
+               (mi.valid_to is not null) as superseded
+        from memory_item_embeddings mie
+        join memory_items mi on mi.item_id = mie.item_id
+        where mie.model_version = %(mv)s and mie.dimension = %(dim)s
+          and mie.embedding <=> %(vec)s::vector < 0.98
+    """
+
+    def __init__(self, cfg: dict | None = None):
+        self.cfg = cfg or load_config()
+        self._embedder = None
+        self._local = threading.local()
+        self._query_cache_lock = threading.Lock()
+        self._query_cache: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()
+        self._query_cache_max = max(0, int(self.cfg.get("retrieval_query_cache_max", 256)))
+        self._query_cache_ttl = max(0.0, float(self.cfg.get("retrieval_query_cache_ttl_s", 300)))
+
+    # --- lifecycle -----------------------------------------------------
+
+    def _connection(self):
+        conn = getattr(self._local, "conn", None)
+        if conn is not None and not conn.closed:
+            return conn
+        conn = psycopg.connect(
+            self.cfg["postgres_dsn"],
+            connect_timeout=self.cfg.get("retrieval_db_connect_timeout_s", 5),
+            autocommit=True,
+        )
+        try:
+            ef = max(20, int(self.cfg.get("retrieval_vector_candidates", 60)))
+            conn.execute(f"SET hnsw.ef_search = {ef}")
+            conn.execute("SET hnsw.iterative_scan = relaxed_order")
+        except Exception:
+            pass
+        self._local.conn = conn
+        return conn
+
+    def _drop_connection(self):
+        conn = getattr(self._local, "conn", None)
+        try:
+            if conn is not None and not conn.closed:
+                conn.close()
+        finally:
+            self._local.conn = None
+
+    # --- vector leg -----------------------------------------------------
+
+    def _encode_query(self, query: str) -> list[float] | None:
+        self._local.vector_error = None
+        cache_key = query[:MAX_DOC_CHARS]
+        now = time.monotonic()
+        with self._query_cache_lock:
+            cached = self._query_cache.get(cache_key)
+            if cached is not None:
+                created, vector = cached
+                if not self._query_cache_ttl or now - created < self._query_cache_ttl:
+                    self._query_cache.move_to_end(cache_key)
+                    return list(vector)
+                self._query_cache.pop(cache_key, None)
+        try:
+            if self._embedder is None:
+                from benchmark.onnx_embed import OnnxBgeM3
+                self._embedder = OnnxBgeM3(
+                    threads=int(self.cfg.get("onnx_threads", 2)))
+            v = self._embedder.encode([query[:MAX_DOC_CHARS]], max_length=MAX_LEN)
+            if v is None or len(v) == 0:
+                self._local.vector_error = "empty_embedding"
+                return None
+            vector = v[0].tolist()
+            if self._query_cache_max:
+                with self._query_cache_lock:
+                    self._query_cache[cache_key] = (time.monotonic(), vector)
+                    self._query_cache.move_to_end(cache_key)
+                    while len(self._query_cache) > self._query_cache_max:
+                        self._query_cache.popitem(last=False)
+            return vector
+        except Exception as error:
+            self._local.vector_error = type(error).__name__
+            return None
+
+    # --- SQL helpers ----------------------------------------------------
+
+    @staticmethod
+    def _structural_where(deep: bool, project_id: str | None,
+                          session_id: str | None, prefix: str = "e") -> tuple[str, dict]:
         extra, params = "", {}
-        # DEEP: broad cross-session/history — no session narrowing
         if not deep and session_id:
-            extra += " and e.session_id = %(session_id)s"
+            extra += f" and {prefix}.session_id = %(session_id)s"
             params["session_id"] = session_id
         if project_id:
-            extra += " and e.project_id = %(project_id)s"
+            extra += f" and {prefix}.project_id = %(project_id)s"
             params["project_id"] = project_id
         return extra, params
 
+    @staticmethod
+    def _item_where(deep: bool, project_id: str | None,
+                    session_id: str | None, at_time: str | None) -> tuple[str, dict]:
+        extra, params = "", {}
+        if project_id:
+            extra += " and mi.project_id = %(project_id)s"
+            params["project_id"] = project_id
+        if at_time:
+            extra += " and mi.valid_from <= %(at)s and (mi.valid_to is null or mi.valid_to > %(at)s)"
+            params["at"] = at_time
+        else:
+            extra += " and mi.valid_to is null"
+        if not deep and session_id:
+            extra += " and exists (select 1 from events se where se.event_id = any(mi.source_event_ids) and se.session_id = %(session_id)s)"
+            params["session_id"] = session_id
+        return extra, params
+
+    @staticmethod
+    def _fetch(cur) -> list[Row]:
+        return [tuple(row) for row in cur.fetchall()]
+
     def _run_legs(self, cur, query: str, limit: int, deep: bool,
                   project_id: str | None, session_id: str | None,
-                  at_time: str | None) -> tuple[list[tuple], list[tuple], bool]:
+                  at_time: str | None) -> tuple[list[Row], list[Row], list[Row], list[Row], bool]:
         vec_ok = False
-        vec_rows: list[tuple] = []
-
-        extra, sparams = self._structural_where(deep, project_id, session_id)
-        fts_params = {"q": query, "lim": limit * 3}
-        fts_params.update(sparams)
+        event_vec_rows: list[Row] = []
+        item_vec_rows: list[Row] = []
+        event_extra, structural = self._structural_where(deep, project_id, session_id)
+        fts_params = {"q": query, "lim": limit * 3, **structural}
         if at_time:
             fts_params["at"] = at_time
-            extra += " and e.created_at <= %(at)s"
-        cur.execute(self.FTS_SQL + extra + " order by e.created_at desc limit %(lim)s",
-                    fts_params)
-        fts_rows = cur.fetchall()
+            event_extra += " and e.created_at <= %(at)s"
+        cur.execute(self.FTS_SQL + event_extra + " order by e.created_at desc limit %(lim)s", fts_params)
+        event_fts_rows = self._fetch(cur)
+
+        item_extra, item_params = self._item_where(deep, project_id, session_id, at_time)
+        item_fts_params = {"q": query, "lim": limit * 3, **item_params}
+        cur.execute(self.ITEM_FTS_SQL + item_extra + " order by mi.valid_from desc limit %(lim)s",
+                    item_fts_params)
+        item_fts_rows = self._fetch(cur)
 
         qvec = self._encode_query(query)
-        if qvec is not None:
-            try:
-                vparams = {"mv": EMBEDDING_MODEL_VERSION, "dim": EMBEDDING_DIM,
-                           "vec": "[" + ",".join(f"{x:.6f}" for x in qvec) + "]",
-                           "lim": limit * 3}
-                vparams.update(sparams)
-                vextra = extra
-                if at_time:
-                    # at_time may have been appended to fts extra already; rebuild
-                    vextra = self._structural_where(deep, project_id, session_id)[0]
-                    vextra += " and e.created_at <= %(at)s"
-                    vparams["at"] = at_time
-                cur.execute(self.VEC_SQL + vextra + " order by me.embedding <=> %(vec)s::vector limit %(lim)s",
-                            vparams)
-                vec_rows = cur.fetchall()
-                vec_ok = True
-            except Exception:
-                vec_rows, vec_ok = [], False  # pgvector unavailable -> FTS fallback
-        return fts_rows, vec_rows, vec_ok
+        if qvec is None:
+            return event_fts_rows, item_fts_rows, event_vec_rows, item_vec_rows, False
 
-    # --- temporal validation ---------------------------------------------
+        vparams = {
+            "mv": EMBEDDING_MODEL_VERSION,
+            "dim": EMBEDDING_DIM,
+            "vec": "[" + ",".join(f"{x:.6f}" for x in qvec) + "]",
+            "lim": limit * 3,
+            "project_id": project_id,
+            **structural,
+        }
+        try:
+            cur.execute(self.VEC_SQL + event_extra +
+                        " order by me.embedding <=> %(vec)s::vector limit %(lim)s", vparams)
+            event_vec_rows = self._fetch(cur)
+            iparams = {"mv": EMBEDDING_MODEL_VERSION, "dim": EMBEDDING_DIM,
+                       "vec": vparams["vec"], "lim": limit * 3, **item_params}
+            cur.execute(self.ITEM_VEC_SQL + item_extra +
+                        " order by mie.embedding <=> %(vec)s::vector limit %(lim)s", iparams)
+            item_vec_rows = self._fetch(cur)
+            vec_ok = True
+        except Exception as error:
+            self._local.vector_error = type(error).__name__
+            event_vec_rows, item_vec_rows, vec_ok = [], [], False
+        return event_fts_rows, item_fts_rows, event_vec_rows, item_vec_rows, vec_ok
+
+    # --- temporal validation --------------------------------------------
 
     def _temporal_flags(self, cur, event_ids: list[str]) -> dict[str, dict]:
-        """For each event, resolve supersession state of derived memory items.
-
-        memory_items carries source_event_ids (jsonb array); an event is
-        superseded when one of its items was superseded by a newer item
-        that is still currently valid (valid_to is null or > now()).
-        """
         flags: dict[str, dict] = {}
         if not event_ids:
             return flags
@@ -184,12 +313,11 @@ class HybridRetriever:
                      "item_kind": kind}
             for eid in (src_ids or []):
                 prev = flags.get(eid)
-                # any non-superseded item clears the flag for that event
-                if prev is None or prev.get("superseded", False):
+                if prev is None or (prev.get("superseded", False) and not entry["superseded"]):
                     flags[eid] = entry
         return flags
 
-    # --- public API --------------------------------------------------------
+    # --- public API ------------------------------------------------------
 
     def search(self, query: str, mode: str = "WARM", limit: int = 10,
                project_id: str | None = None, session_id: str | None = None,
@@ -197,64 +325,108 @@ class HybridRetriever:
         t0 = time.perf_counter()
         deep = mode == "DEEP"
         top_n = limit * 3 if not deep else max(limit * 5, 50)
-
-        conn = psycopg.connect(self.cfg["postgres_dsn"], connect_timeout=5)
+        conn = self._connection()
         try:
             with conn.cursor() as cur:
-                fts_rows, vec_rows, vec_ok = self._run_legs(
+                event_fts, item_fts, event_vec, item_vec, vec_ok = self._run_legs(
                     cur, query, top_n if deep else limit, deep,
                     project_id, session_id, at_time)
-                rrf = self._rrf(fts_rows, vec_rows, limit)
-                ids = [r[0] for r in rrf]
-                flags = self._temporal_flags(cur, ids)
-        finally:
-            conn.close()
+                rrf = self._rrf(event_fts + item_fts, event_vec + item_vec,
+                                max(limit * 3, 20))
+                event_ids = [r[1] for r, _, _ in rrf if r[2] is None and r[1]]
+                flags = self._temporal_flags(cur, event_ids)
+        except psycopg.OperationalError:
+            self._drop_connection()
+            raise
 
-        # temporal validation: exclude/downrank superseded for current queries
+        scored = []
+        for row, sources, score in rrf:
+            (key, event_id, item_id, session, project, event_type, source,
+             created_at, text, source_ids, confidence, vf, vt,
+             item_superseded) = row
+            f = flags.get(event_id, {}) if item_id is None else {}
+            superseded = bool(item_superseded or f.get("superseded", False))
+            if at_time is None and item_id is None and superseded:
+                score *= 0.25
+            score *= self._intent_weight(query, row)
+            score *= self._exact_text_weight(query, text)
+            scored.append((row, sources, score, superseded, f))
+
+        scored.sort(key=lambda value: -value[2])
         results = []
-        for rank, (row, sources, score) in enumerate(rrf, start=1):
-            eid = row[0]
-            f = flags.get(eid, {})
-            superseded = f.get("superseded", False)
-            if at_time is None and superseded:
-                score = score * 0.25  # downrank, do not hard-hide (evidence kept)
-                # historical flag stays on the item for the client
-            results.append({
-                "event_id": eid,
-                "session_id": row[1],
-                "project_id": row[2],
-                "event_type": row[3],
-                "source": row[4],
-                "created_at": row[5].isoformat() if hasattr(row[5], "isoformat") else row[5],
-                "text": (row[6] or "")[:1000],
+        for rank, (row, sources, score, superseded, f) in enumerate(scored[:limit], start=1):
+            (key, event_id, item_id, session, project, event_type, source,
+             created_at, text, source_ids, confidence, vf, vt,
+             item_superseded) = row
+            result = {
+                "event_id": event_id,
+                "session_id": session,
+                "project_id": project,
+                "event_type": event_type,
+                "source": source,
+                "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+                "text": (text or "")[:1000],
                 "score": round(score, 6),
                 "rank": rank,
-                "retrieval_source": sources,  # HOT|FTS|VECTOR|BOTH (FTS/VECTOR here)
-                "valid_from": f.get("valid_from"),
-                "valid_to": f.get("valid_to"),
+                "retrieval_source": sources,
+                "valid_from": (vf.isoformat() if hasattr(vf, "isoformat") else vf) or f.get("valid_from"),
+                "valid_to": (vt.isoformat() if hasattr(vt, "isoformat") else vt) or f.get("valid_to"),
                 "superseded": superseded,
-            })
-        dt_ms = (time.perf_counter() - t0) * 1000
+            }
+            if item_id is not None:
+                result.update({
+                    "memory_item_id": item_id,
+                    "memory_kind": source,
+                    "source_event_ids": source_ids or [],
+                    "confidence": confidence,
+                })
+            results.append(result)
         return {
             "query": query, "mode": mode, "limit": limit,
             "vector_leg": vec_ok,
+            "vector_degraded": not vec_ok,
+            "vector_error": getattr(self._local, "vector_error", None),
             "count": len(results),
             "results": results,
-            "latency_ms": round(dt_ms, 2),
+            "latency_ms": round((time.perf_counter() - t0) * 1000, 2),
         }
 
     @staticmethod
-    def _rrf(fts_rows: list[tuple], vec_rows: list[tuple],
-             limit: int) -> list[tuple[tuple, str, float]]:
+    def _intent_weight(query: str, row: Row) -> float:
+        """Small deterministic rerank for answer type, not a truth source."""
+        q = (query or "").lower()
+        kind = row[6] if row[2] is not None else row[5]
+        if any(marker in q for marker in ("ошиб", "сбой", "почему упал", "не сработал")):
+            return 1.20 if kind in {"FAILURE_PATTERN", "PROCEDURE", "EXPERIENCE", "ERROR"} else 0.78
+        if any(marker in q for marker in ("реши", "решение", "выбрали", "зафиксировали")):
+            return 1.20 if kind in {"DECISION", "CONSTRAINT"} else 0.84
+        if any(marker in q for marker in ("ограничен", "нельзя", "требован")):
+            return 1.18 if kind == "CONSTRAINT" else 0.88
+        if any(marker in q for marker in ("похож", "аналог", "опыт", "раньше")):
+            return 1.15 if kind in {"EXPERIENCE", "PROCEDURE", "FAILURE_PATTERN", "REJECTED_APPROACH"} else 0.90
+        return 1.0
+
+    @staticmethod
+    def _exact_text_weight(query: str, text: str | None) -> float:
+        """Keep exact identifiers/phrases ahead of merely similar vectors."""
+        needle = " ".join((query or "").lower().split())
+        haystack = " ".join((text or "").lower().split())
+        if len(needle) >= 4 and needle in haystack:
+            return 3.0
+        return 1.0
+
+    @staticmethod
+    def _rrf(fts_rows: list[Row], vec_rows: list[Row], limit: int) -> list[tuple[Row, str, float]]:
         scores: dict[str, float] = {}
-        rows: dict[str, tuple] = {}
-        srcs: dict[str, set] = {}
+        rows: dict[str, Row] = {}
+        srcs: dict[str, set[str]] = {}
         for rows_list, tag in ((fts_rows, "FTS"), (vec_rows, "VECTOR")):
             for i, row in enumerate(rows_list, start=1):
-                eid = row[0]
-                scores[eid] = scores.get(eid, 0.0) + 1.0 / (RRF_K + i)
-                rows.setdefault(eid, row)
-                srcs.setdefault(eid, set()).add(tag)
+                key = row[0]
+                weight = ITEM_WEIGHT if row[2] is not None else 1.0
+                scores[key] = scores.get(key, 0.0) + weight / (RRF_K + i)
+                rows.setdefault(key, row)
+                srcs.setdefault(key, set()).add(tag)
         ranked = sorted(scores.items(), key=lambda kv: -kv[1])[:limit]
-        return [(rows[eid], "+".join(sorted(srcs[eid])) if len(srcs[eid]) > 1
-                 else next(iter(srcs[eid])), sc) for eid, sc in ranked]
+        return [(rows[key], "BOTH" if len(srcs[key]) > 1 else next(iter(srcs[key])), score)
+                for key, score in ranked]

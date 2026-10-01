@@ -33,7 +33,8 @@ from storage.pg import EXPERIENCE_KINDS, Postgres
 
 ROUTER_URL = os.environ.get("MEGABRAIN_ROUTER_URL", "http://127.0.0.1:4100")
 ROUTER_API_KEY = os.environ.get("MODEL_ROUTER_API_KEY", "")
-MODEL = "main-auto"
+MODEL = os.environ.get("MEGABRAIN_CONSOLIDATION_MODEL", "main-auto")
+HEAVY_MODEL = os.environ.get("MEGABRAIN_CONSOLIDATION_HEAVY_MODEL", "router-memory-heavy")
 TASK_CLASS = "SUMMARIZE"
 PROFILE = "CHEAPEST"
 STAGE2_PROFILE = os.environ.get("MB_CONSOLIDATION_STAGE2_PROFILE", "QUALITY")
@@ -135,7 +136,7 @@ def _first_json_object(text: str) -> dict | None:
     return None
 
 
-def _build_body(events: list[dict], profile: str, max_tokens: int) -> dict:
+def _build_body(events: list[dict], profile: str, max_tokens: int, model: str = MODEL) -> dict:
     lines = [f"[{e['event_id']}] {e['event_type']}: {_text(e)[:1200]}" for e in events]
     prompt = (
         "Extract only implicit candidate project memory. Do not confirm facts. "
@@ -144,10 +145,14 @@ def _build_body(events: list[dict], profile: str, max_tokens: int) -> dict:
         "importance must be LOW, NORMAL, HIGH or CRITICAL (decisions, constraints, "
         "architecture, root causes, failures and lessons are HIGH or CRITICAL); "
         "include confidence in [0,1] and source_event_ids from the input. "
+        "Every item must contain at least one meaningful non-empty field (prefer "
+        "12 or more characters) in "
+        "title, situation, action, result, lesson, reason, cause, effect, "
+        "recommendation or description; never return empty placeholder items. "
         "When unsure, lower the confidence instead of inventing facts.\n" + "\n".join(lines)
     )
     return {
-        "model": MODEL,
+        "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "extra_body": {
             "task_class": TASK_CLASS,
@@ -176,9 +181,16 @@ def _parse_items(raw_obj: dict | None, ids: set[str]) -> list[dict]:
         importance = str(raw.get("importance") or "").upper()
         if importance not in IMPORTANCE_LEVELS:
             importance = "NORMAL"
+        content = {key: str(raw.get(key) or "").strip() for key in (
+            "title", "situation", "action", "result", "lesson", "reason",
+            "cause", "effect", "recommendation", "description")}
+        # Empty LLM shells are worse than no memory: they pollute retrieval,
+        # consume embeddings and make a false claim look authoritative.
+        if not any(content.values()):
+            continue
         items.append({
             "kind": kind,
-            "content": {key: raw.get(key) or "" for key in ("title", "situation", "action", "result", "lesson")},
+            "content": content,
             "confidence": confidence,
             "importance": importance,
             "source_event_ids": source_ids,
@@ -186,10 +198,40 @@ def _parse_items(raw_obj: dict | None, ids: set[str]) -> list[dict]:
     return items
 
 
+def deterministic_candidate(event: dict) -> dict | None:
+    """Lossless low-confidence fallback when the router emits no usable item."""
+    text = _text(event)
+    if len(text) < 24:
+        return None
+    event_type = event.get("event_type") or "EVENT"
+    kind = {
+        "ERROR": "FAILURE_PATTERN",
+        "TEST_RESULT": "PROCEDURE",
+        "FILE_WRITE": "PROCEDURE",
+    }.get(event_type, "EXPERIENCE")
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), text)
+    return {
+        "kind": kind,
+        "content": {
+            "item_key": f"fallback:{event['event_id']}",
+            "title": first_line[:180],
+            "situation": f"Source event {event['event_id']} ({event_type}).",
+            "action": text[:1200] if kind == "PROCEDURE" else "",
+            "result": text[:1200] if kind != "PROCEDURE" else "",
+            "lesson": "Candidate extracted directly from source evidence; verify before treating as a confirmed rule.",
+            "status": "CANDIDATE",
+            "fallback": True,
+        },
+        "confidence": 0.35,
+        "importance": "NORMAL",
+        "source_event_ids": [event["event_id"]],
+    }
+
+
 def extract_items(events: list[dict], transport: Callable[..., tuple[dict, dict, dict]],
-                  profile: str = PROFILE, max_tokens: int = 2000) -> tuple[list[dict], dict]:
+                  profile: str = PROFILE, max_tokens: int = 2000, model: str = MODEL) -> tuple[list[dict], dict]:
     """Single-stage extraction (kept for tests and stage-1 reuse)."""
-    response, headers, usage = transport(_build_body(events, profile, max_tokens))
+    response, headers, usage = transport(_build_body(events, profile, max_tokens, model))
     content = (response.get("choices") or [{"message": {"content": ""}}])[0]["message"].get("content", "")
     obj = _first_json_object(content) or (response if isinstance(response, dict) and "items" in response else None)
     return _parse_items(obj, {event["event_id"] for event in events}), {
@@ -477,10 +519,21 @@ class ConsolidationWorker:
             trigger = "LOW_CONFIDENCE"
         if trigger:
             stage, reason = 2, trigger
-            items2, usage2 = extract_items(events, self.transport, STAGE2_PROFILE, max_tokens=3000)
+            items2, usage2 = extract_items(events, self.transport, STAGE2_PROFILE, max_tokens=3000, model=HEAVY_MODEL)
             if usage2.get("parsed") and items2:
                 items, usage = items2, usage2
-        return items, {**usage, "escalation_stage": stage, "escalation_reason": reason}
+        if not items:
+            items = []
+            for event in events:
+                candidate = deterministic_candidate(event)
+                if candidate and (event["event_type"] in {"ERROR", "TEST_RESULT", "FILE_WRITE"}
+                                  or importance_signal(_text(event)) >= 2):
+                    items.append(candidate)
+            if items:
+                usage = {**usage, "fallback_items": len(items),
+                         "escalation_reason": usage.get("escalation_reason") or "DETERMINISTIC_FALLBACK"}
+        return items, {**usage, "escalation_stage": stage,
+                       "escalation_reason": usage.get("escalation_reason") or reason}
 
     def dry_run(self) -> dict:
         projects = self.repository.eligible_projects()
@@ -545,10 +598,14 @@ class ConsolidationWorker:
             # ONE transaction: derived items + run record + watermark (atomic).
             with self.repository.pg.conn.transaction():
                 for item in items:
+                    extractor = "DETERMINISTIC" if item.get("content", {}).get("fallback") else "LLM"
+                    extractor_version = ("megabrain-0.2.0:fallback"
+                                         if extractor == "DETERMINISTIC"
+                                         else "megabrain-0.2.0:router-memory")
                     self.repository.pg.add_derived_item(
                         project, item["kind"], dict(item["content"], importance=item["importance"]),
                         item["source_event_ids"], confidence=item["confidence"],
-                        extractor="LLM", extractor_version="megabrain-0.1.2:main-auto",
+                        extractor=extractor, extractor_version=extractor_version,
                         commit=False)
                 reported_in = usage.get("prompt_tokens")
                 reported_out = usage.get("completion_tokens")

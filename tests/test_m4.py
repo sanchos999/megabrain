@@ -70,6 +70,19 @@ def db():
     return psycopg.connect(load_config()["postgres_dsn"])
 
 
+def restart_service():
+    """Restart the canary unit in both a user shell and root-run CI."""
+    cmd = ["systemctl", "--user", "restart", "megabrain.service"]
+    service_user = os.environ.get("MEGABRAIN_SERVICE_USER")
+    if service_user and os.geteuid() == 0:
+        runtime = os.environ.get("MEGABRAIN_XDG_RUNTIME_DIR", "/run/user/1000")
+        bus = os.environ.get("MEGABRAIN_DBUS_ADDRESS", f"unix:path={runtime}/bus")
+        cmd = ["runuser", "-u", service_user, "--", "env",
+               f"XDG_RUNTIME_DIR={runtime}",
+               f"DBUS_SESSION_BUS_ADDRESS={bus}", *cmd]
+    subprocess.run(cmd, check=True)
+
+
 @pytest.fixture(scope="module", autouse=True)
 def seed_events():
     # project + events for retrieval tests
@@ -113,7 +126,7 @@ def seed_events():
     sem_ev = events[1]
     text = sem_ev["payload"]["text"]
     chash = __import__("hashlib").sha256(text.encode()).hexdigest()
-    from benchmark.onnx_embed import OnnxBgeM3
+    from benchmark.onnx_embed import EMBEDDING_MODEL_VERSION, OnnxBgeM3
     vec = OnnxBgeM3(threads=4).encode([text], max_length=512)[0].tolist()
     pg = db()
     with pg.cursor() as cur:
@@ -123,7 +136,7 @@ def seed_events():
             values (%s,%s,%s,%s,%s,%s, now())
             on conflict (event_id, model_version) do nothing
         """, (sem_ev["event_id"], chash, "bge-m3-int8-onnx",
-              "xenova-bge-m3-onnx-int8-512", 1024, vec))
+              EMBEDDING_MODEL_VERSION, 1024, vec))
     pg.commit(); pg.close()
 
     yield events
@@ -282,7 +295,7 @@ def test_j_restart_memory_survives():
                 {"query": "KODOVIK-7742", "project_id": PROJECT, "limit": 3})
     assert r["count"] >= 1
     before = r["results"][0]["event_id"]
-    subprocess.run(["systemctl", "--user", "restart", "megabrain.service"], check=True)
+    restart_service()
     for _ in range(30):
         try:
             st, r = api("GET", "/health")

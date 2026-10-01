@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Security
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -22,9 +24,8 @@ from projects.resolver import ProjectResolver
 from retrieval.capsule import CapsuleBuilder
 from storage.pg import BlobStore, Postgres
 
-VERSION = "0.1.2"
+VERSION = "0.2.0"
 
-app = FastAPI(title="MegaBrain", version=VERSION)
 bearer = HTTPBearer(auto_error=False)
 
 
@@ -33,7 +34,7 @@ def build_state() -> dict:
     telemetry = Telemetry()
     blobs = BlobStore(cfg["blob_dir"])
     pg = Postgres(cfg["postgres_dsn"], blobs, cfg["blob_inline_limit"])
-    ram = L0RAM()
+    ram = L0RAM(cfg["hot_cache_max_projects"], cfg["hot_cache_ttl_s"])
     redis_layer = L1Redis(cfg["redis_url"], cfg["redis_prefix"], telemetry)
     resolver = ProjectResolver(pg, ram, redis_layer, telemetry)
     capsules = CapsuleBuilder(pg, ram, redis_layer, telemetry, cfg)
@@ -42,6 +43,25 @@ def build_state() -> dict:
 
 
 STATE = build_state()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Warm the local ONNX session before the first user request in production."""
+    if os.environ.get("MB_RETRIEVAL_PREWARM", "0").lower() not in {"1", "true", "yes"}:
+        yield
+        return
+    try:
+        await run_in_threadpool(_get_retriever()._encode_query, "warmup")
+        STATE["telemetry"].inc("retrieval_model_prewarm_ok")
+    except Exception as error:
+        # Retrieval still has a documented FTS-only fallback; startup must not
+        # make the durable event API unavailable because a model is missing.
+        STATE["telemetry"].inc(f"retrieval_model_prewarm_error:{type(error).__name__}")
+    yield
+
+
+app = FastAPI(title="MegaBrain", version=VERSION, lifespan=lifespan)
 
 
 async def require_auth(request: Request,
@@ -391,10 +411,16 @@ async def memory_search(s: MemorySearchIn):
                 "capsule": cap, "retrieval_source": "HOT"}
 
     # WARM / DEEP
-    res = _get_retriever().search(
+    res = await run_in_threadpool(
+        _get_retriever().search,
         query=s.query, mode=mode, limit=s.limit,
         project_id=s.project_id, session_id=s.session_id,
         at_time=s.at_time)
+    if res.get("vector_degraded"):
+        STATE["telemetry"].inc("retrieval_vector_degraded")
+    else:
+        STATE["telemetry"].inc("retrieval_vector_ok")
+    STATE["telemetry"].observe("memory_search_ms", res["latency_ms"])
     return res
 
 

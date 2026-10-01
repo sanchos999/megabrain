@@ -2,7 +2,7 @@
 
 MegaBrain is a standalone durable-memory service for AI agents. It exposes a REST API and keeps immutable raw events in PostgreSQL. Redis is an optional HOT cache; pgvector and embeddings are derived indexes.
 
-Version: 0.1.2
+Version: 0.2.0
 
 *(Russian: см. [README.ru.md](README.ru.md))*
 
@@ -79,7 +79,7 @@ Measured production deployment: HOT resolve + capsule combined p50 about 9 ms, p
 
 ## Embeddings
 
-The default model is BAAI/bge-m3, dimension 1024, configured through `MEGABRAIN_EMBEDDING_MODEL` and `MEGABRAIN_MODEL_DIR`. Model binaries are never included in Git or images. A fresh install must download/setup the model separately; CPU operation is supported but slower and requires additional RAM/disk.
+The embedding worker uses the local pinned `Xenova/bge-m3` ONNX INT8 model, dimension 1024, max length 512. `megabrain-embedding-worker.service` runs `scripts/ensure_embedding_model.py` before startup, downloads the pinned snapshot once into `models/bge-m3`, and then works offline. Model binaries are never included in Git or images. The worker uses bounded batching and CPU/memory limits; embeddings are derived and can be rebuilt from the PostgreSQL event log.
 
 ## Hermes adapter
 

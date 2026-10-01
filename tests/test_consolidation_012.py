@@ -176,6 +176,8 @@ def test_escalation_on_low_confidence_uses_stronger_profile():
     result = ConsolidationWorker(r, t).run_once()
     assert len(t.requests) == 2, "low confidence must trigger a second, stronger call"
     assert t.requests[1]["extra_body"]["profile"] != t.requests[0]["extra_body"]["profile"]
+    assert t.requests[0]["model"] == "main-auto"
+    assert t.requests[1]["model"] == "router-memory-heavy"
     assert result["escalation_stage"] == 2 and result["escalation_reason"] == "LOW_CONFIDENCE"
     assert result["llm_calls"] == 2
 

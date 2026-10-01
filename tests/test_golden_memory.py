@@ -27,7 +27,7 @@ FIXTURES = [
      ["EXPERIENCE"], True),
     ("explicit_decision_ignored_by_llm_kind",
      [ev("P", 0, "РЕШЕНИЕ: переходим на Postgres 17")],
-     '{"items":[{"kind":"EXPERIENCE","importance":"HIGH","source_event_ids":["evt_P_0"],"confidence":1.0}]}',
+     '{"items":[{"kind":"EXPERIENCE","title":"Postgres migration decision","importance":"HIGH","source_event_ids":["evt_P_0"],"confidence":1.0}]}',
      ["EXPERIENCE"], True),
     ("constraint",
      [ev("P", 0, "Ограничение: нельзя менять схему без миграции и отката")],

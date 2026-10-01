@@ -17,7 +17,7 @@ megabrain-embedding-worker.service (systemd user unit)
 - Idempotency: (event_id, content_hash, model_version); пересчёт только
   при смене content_hash (update), иначе skip
 - Scope: все events с непустым payload->>'text' (left 4000 chars)
-- Model: xenova-bge-m3-onnx-int8-512, 1024d, ONNX int8, max_length=512
+- Model: xenova-bge-m3-onnx-int8-512-cls-v4, 1024d, local pinned ONNX int8, max_length=512
 - Single instance: flock state/embedding-worker.lock
 - SIGTERM-safe: finishing current batch → progress save → exit 0
 - Progress: state/embedding-worker.json (после каждого батча)
@@ -25,23 +25,25 @@ megabrain-embedding-worker.service (systemd user unit)
 ## Resource limits (verified)
 
     Nice=15
-    CPUQuota=150%
+    CPUQuota=300%
     CPUWeight=30
     MemoryHigh=3G
     MemoryMax=4G
     IOSchedulingClass=idle
     TimeoutStopSec=600
 
-Замер: процесс держится ~1.3 CPU (в квоте), RAM ~3.4 GB.
-Параметры ONNX: MB_EMB_THREADS=2 (соответствует квоте; 10 потоков давали
-5-минутные батчи под квотой и SIGKILL по таймауту), MB_EMB_BATCH=16,
-MB_EMB_SLEEP_S=2.0 между батчами.
+Параметры по умолчанию для systemd: `MB_EMB_THREADS=6`, `MB_EMB_BATCH=64`,
+`MB_EMB_SLEEP_S=0.05`. Из-за batch-зависимости этого ONNX-экспорта каждый
+текст кодируется отдельным inference (batch настраивает только размер
+database-commit); query использует тот же one-text путь. Dynamic padding
+ускоряет короткие сообщения, а `MemoryMax=4G` защищает API и PostgreSQL.
 
 ## Backfill
 
-29,347 missing embeddings на момент старта; достраивается малыми батчами
-по 16 с паузами — часы/дни, это нормально. Память уже работает на FTS +
-35,072 импортированных векторах.
+Индексатор сначала заполняет канонические `memory_items`, затем сырые
+события. Он идемпотентен, продолжает работу после перезапуска и не блокирует
+запись событий. Старые версии векторов можно удалить только после проверки
+полного покрытия новой версией.
 
 ## Импорт M3-векторов (разовая операция)
 

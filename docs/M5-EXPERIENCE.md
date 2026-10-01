@@ -24,8 +24,13 @@ LLM никогда не объявляет confirmed fact. Каждый derived 
 
 ## Consolidation worker (M5 §13-14)
 
-- Модель: `MEGABRAIN_CONSOLIDATION_MODEL=glm-5.3` (FIXED canonical, НЕ
-  compression-auto/main-auto).
+- Основной запрос использует виртуальную роль маршрутизатора
+  `MEGABRAIN_CONSOLIDATION_MODEL=router-memory`; эскалация по низкой уверенности,
+  ошибке структуры или потере важного содержания использует
+  `MEGABRAIN_CONSOLIDATION_HEAVY_MODEL=router-memory-heavy`.
+- Worker обращается к настроенному `MEGABRAIN_ROUTER_URL` с отдельным ключом
+  клиента `megabrain`. Router выбирает провайдера и каноническую модель по
+  активному пулу, доступности и задаче; worker не закрепляет конкретную модель.
 - Читает meaningful events (batch 25) после cursor; группирует по project.
 - LLM json_object → robust parse (first JSON object) → валидация kind + реальные
   source_event_ids → `add_derived_item`.

@@ -1,19 +1,27 @@
 [Unit]
-Description=MegaBrain API
-After=network-online.target
-Wants=network-online.target
+Description=MegaBrain embedding worker
+After=megabrain.service
 
 [Service]
 Type=simple
 WorkingDirectory=%h/megabrain
 EnvironmentFile=%h/.config/megabrain/megabrain.env
+Environment=MB_EMB_SLEEP_S=0.05
+Environment=MB_EMB_IDLE_SLEEP_S=30.0
+Environment=MB_EMB_THREADS=6
+Environment=MB_EMB_BATCH=64
 Environment=MB_ONNX_MODEL_DIR=%h/megabrain/models/bge-m3
 Environment=MB_ONNX_REVISION=4de13258303883538bd53b696b452bf8099f0858
 Environment=MB_ONNX_SHA256=0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d
-Environment=MB_RETRIEVAL_PREWARM=1
 ExecStartPre=%h/megabrain/.venv/bin/python %h/megabrain/scripts/ensure_embedding_model.py
-ExecStart=%h/megabrain/.venv/bin/python -m uvicorn api.main:app --host ${MEGABRAIN_HOST} --port ${MEGABRAIN_PORT}
+ExecStart=%h/megabrain/.venv/bin/python %h/megabrain/scripts/embedding_worker.py
 Restart=on-failure
+RestartSec=30
+Nice=15
+CPUQuota=300%
+MemoryHigh=3G
+MemoryMax=4G
+TimeoutStopSec=600
 
 [Install]
 WantedBy=default.target

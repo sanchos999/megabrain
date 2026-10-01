@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import OrderedDict
 
 import redis as redis_lib
 
@@ -48,19 +49,37 @@ class Telemetry:
 
 
 class L0RAM:
-    """In-process hot cache. Key: project_id -> structured hot state."""
+    """Bounded in-process hot cache.
 
-    def __init__(self):
+    The cache is an acceleration layer only: PostgreSQL/Redis remain the
+    source of truth. LRU+TTL prevents a long-lived API process from retaining
+    every project ever seen.
+    """
+
+    def __init__(self, max_projects: int = 128, ttl_s: float = 1800):
         self._lock = threading.Lock()
-        self._data: dict[str, dict] = {}
+        self.max_projects = max(1, int(max_projects))
+        self.ttl_s = max(0.0, float(ttl_s))
+        self._data: OrderedDict[str, tuple[float, dict]] = OrderedDict()
 
     def get(self, project_id: str) -> dict | None:
         with self._lock:
-            return self._data.get(project_id)
+            entry = self._data.get(project_id)
+            if entry is None:
+                return None
+            created, state = entry
+            if self.ttl_s and time.monotonic() - created >= self.ttl_s:
+                self._data.pop(project_id, None)
+                return None
+            self._data.move_to_end(project_id)
+            return state
 
     def put(self, project_id: str, state: dict):
         with self._lock:
-            self._data[project_id] = state
+            self._data[project_id] = (time.monotonic(), state)
+            self._data.move_to_end(project_id)
+            while len(self._data) > self.max_projects:
+                self._data.popitem(last=False)
 
     def invalidate(self, project_id: str):
         with self._lock:

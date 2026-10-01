@@ -13,17 +13,18 @@ import psycopg
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+from benchmark.onnx_embed import EMBEDDING_MODEL_VERSION
 from core.config import load_config
 from operations import WorkerHeartbeat
 
 STATE = Path(os.environ.get("MB_STATE_DIR") or (ROOT / "state"))
-MODEL_VERSION = "xenova-bge-m3-onnx-int8-512"
+MODEL_VERSION = EMBEDDING_MODEL_VERSION
 MODEL = "bge-m3-int8-onnx"
 DIM = 1024
 MAX_DOC_CHARS = 4000
 MAX_LEN = 512
-ONNX_THREADS = int(os.environ.get("MB_EMB_THREADS", "2"))
-BATCH = int(os.environ.get("MB_EMB_BATCH", "16"))
+ONNX_THREADS = int(os.environ.get("MB_EMB_THREADS", "4"))
+BATCH = int(os.environ.get("MB_EMB_BATCH", "64"))
 SLEEP_BETWEEN_BATCHES_S = float(os.environ.get("MB_EMB_SLEEP_S", "2.0"))
 SLEEP_WHEN_IDLE_S = float(os.environ.get("MB_EMB_IDLE_SLEEP_S", "30.0"))
 HNSW_ROW_THRESHOLD = 50000
@@ -45,10 +46,48 @@ class Progress:
     def save(self): self.path.write_text(json.dumps(self.data, ensure_ascii=False))
 
 def fetch_batch(cur, limit):
-    cur.execute("""select e.event_id, encode(sha256(convert_to(left(e.payload->>'text', %(cap)s), 'UTF8')), 'hex'), left(e.payload->>'text', %(cap)s)
+    cur.execute("""select e.event_id, e.project_id, encode(sha256(convert_to(left(e.payload->>'text', %(cap)s), 'UTF8')), 'hex'), left(e.payload->>'text', %(cap)s)
         from events e left join memory_embeddings me on me.event_id=e.event_id and me.model_version=%(mv)s and me.content_hash=encode(sha256(convert_to(left(e.payload->>'text', %(cap)s), 'UTF8')), 'hex')
         where length(trim(coalesce(e.payload->>'text',''))) > 0 and me.event_id is null order by e.created_at desc limit %(lim)s""", {"cap":MAX_DOC_CHARS,"mv":MODEL_VERSION,"lim":limit})
-    return [{"event_id":r[0],"content_hash":r[1],"text":r[2]} for r in cur.fetchall()]
+    return [{"event_id":r[0],"project_id":r[1],"content_hash":r[2],"text":r[3]} for r in cur.fetchall()]
+
+def fetch_item_batch(cur, limit):
+    """Canonical memory is indexed before noisy raw events."""
+    cur.execute("""with item_text as (
+        select mi.item_id,
+               left(concat_ws(' ', mi.kind,
+                    nullif(mi.content->>'title', ''),
+                    nullif(mi.content->>'summary', ''),
+                    nullif(mi.content->>'text', ''),
+                    nullif(mi.content->>'content', ''),
+                    nullif(mi.content->>'situation', ''),
+                    nullif(mi.content->>'lesson', ''),
+                    nullif(mi.content->>'rationale', ''),
+                    nullif(mi.content->>'reason', ''),
+                    nullif(mi.content->>'cause', ''),
+                    nullif(mi.content->>'effect', ''),
+                    nullif(mi.content->>'outcome', ''),
+                    nullif(mi.content->>'result', ''),
+                    nullif(mi.content->>'recommendation', ''),
+                    nullif(mi.content->>'action', ''),
+                    nullif(mi.content->>'description', '')), %(cap)s) as text
+        from memory_items mi
+        where length(trim(mi.content::text)) > 0
+          and coalesce(mi.content->>'content_status', '') <> 'REJECTED_EMPTY'
+    ), hashed as (
+        select item_id, text,
+               encode(sha256(convert_to(text, 'UTF8')), 'hex') as content_hash
+        from item_text
+    )
+        select h.item_id, h.content_hash, h.text
+        from hashed h
+        left join memory_item_embeddings mie
+          on mie.item_id=h.item_id and mie.model_version=%(mv)s
+        join memory_items mi on mi.item_id=h.item_id
+        where mie.item_id is null or mie.content_hash <> h.content_hash
+        order by mi.valid_to nulls first, mi.valid_from desc limit %(lim)s""",
+        {"cap": MAX_DOC_CHARS, "mv": MODEL_VERSION, "lim": limit})
+    return [{"item_id":r[0],"content_hash":r[1],"text":r[2]} for r in cur.fetchall()]
 
 def maybe_build_hnsw(cur, progress):
     if progress.data.get("hnsw_built"): return
@@ -57,16 +96,25 @@ def maybe_build_hnsw(cur, progress):
         cur.execute("create index if not exists idx_memory_embeddings_hnsw on memory_embeddings using hnsw (embedding vector_cosine_ops) with (m=16,ef_construction=200)")
         progress.data.update(hnsw_built=True,hnsw_rows=n)
 
+
 def main():
     signal.signal(signal.SIGTERM,_handle_term); signal.signal(signal.SIGINT,_handle_term)
     STATE.mkdir(parents=True, exist_ok=True); lock=open(STATE/"embedding-worker.lock","w")
     try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError: return 1
     cfg=load_config(); heartbeat=WorkerHeartbeat("embedding",dsn=cfg["postgres_dsn"])
+    conn = None
+
+    def connect():
+        c = psycopg.connect(cfg["postgres_dsn"], connect_timeout=15)
+        c.autocommit = True
+        return c
+
+    item_index_available = True
     try:
-        conn=psycopg.connect(cfg["postgres_dsn"]); conn.autocommit=True
+        conn = connect()
     except Exception as error:
-        heartbeat.error(error); print(f"embedding database init failed: {type(error).__name__}",flush=True); return 1
+        heartbeat.error(error); print(f"embedding database init failed: {type(error).__name__}: {error}",flush=True); return 1
     progress=Progress(STATE/"embedding-worker.json").load()
     try:
         from benchmark.onnx_embed import OnnxBgeM3
@@ -75,17 +123,46 @@ def main():
         heartbeat.error(error); print(f"embedding model init failed: {type(error).__name__}",flush=True); return 1
     while not _stop:
         try:
+            if conn is None or conn.closed:
+                conn = connect()
             with conn.cursor() as cur:
-                batch = fetch_batch(cur, BATCH)
+                item_batch = []
+                if item_index_available:
+                    try:
+                        item_batch = fetch_item_batch(cur, BATCH)
+                    except psycopg.errors.UndefinedTable:
+                        # Older installations can finish raw-event indexing
+                        # while migration 011 is being rolled out.
+                        item_index_available = False
+                batch = item_batch or fetch_batch(cur, BATCH)
                 if not batch:
                     maybe_build_hnsw(cur,progress); progress.data["last_batch_at"]=time.time(); progress.save(); heartbeat.update(state="IDLE",success=True); time.sleep(SLEEP_WHEN_IDLE_S); continue
-                vecs=model.encode([b["text"] for b in batch],max_length=MAX_LEN)
-                rows=[(b["event_id"],b["content_hash"],MODEL,MODEL_VERSION,DIM,v.tolist()) for b,v in zip(batch,vecs)]
-                cur.executemany("""insert into memory_embeddings(event_id,content_hash,model,model_version,dimension,embedding) values (%s,%s,%s,%s,%s,%s) on conflict(event_id,model_version) do update set content_hash=excluded.content_hash,embedding=excluded.embedding,indexed_at=now() where memory_embeddings.content_hash!=excluded.content_hash""",rows)
-                progress.data["embedded"]+=len(batch); progress.data["batches"]+=1; progress.data["last_event_id"]=batch[-1]["event_id"]; progress.data["last_batch_at"]=time.time(); maybe_build_hnsw(cur,progress); progress.save(); heartbeat.update(state="RUNNING",success=True,processed_items=len(batch))
+                # Xenova's quantized ONNX export changes a sample slightly
+                # when unrelated samples share its batch. One-text inference
+                # keeps index vectors exactly compatible with query vectors;
+                # BATCH still amortizes the database round-trip.
+                vecs=[model.encode([b["text"]], max_length=MAX_LEN)[0] for b in batch]
+                if item_batch:
+                    rows=[(b["item_id"],b["content_hash"],MODEL,MODEL_VERSION,DIM,v.tolist()) for b,v in zip(batch,vecs)]
+                    cur.executemany("""insert into memory_item_embeddings(item_id,content_hash,model,model_version,dimension,embedding) values (%s,%s,%s,%s,%s,%s) on conflict(item_id,model_version) do update set content_hash=excluded.content_hash,embedding=excluded.embedding,indexed_at=now() where memory_item_embeddings.content_hash!=excluded.content_hash""",rows)
+                else:
+                    rows=[(b["event_id"],b.get("project_id"),b["content_hash"],MODEL,MODEL_VERSION,DIM,v.tolist()) for b,v in zip(batch,vecs)]
+                    cur.executemany("""insert into memory_embeddings(event_id,project_id,content_hash,model,model_version,dimension,embedding) values (%s,%s,%s,%s,%s,%s,%s) on conflict(event_id,model_version) do update set project_id=excluded.project_id,content_hash=excluded.content_hash,embedding=excluded.embedding,indexed_at=now() where memory_embeddings.content_hash!=excluded.content_hash""",rows)
+                progress.data["embedded"]+=len(batch); progress.data["batches"]+=1; progress.data["last_event_id"]=batch[-1].get("event_id") or batch[-1].get("item_id"); progress.data["last_batch_at"]=time.time(); maybe_build_hnsw(cur,progress); progress.save(); heartbeat.update(state="RUNNING",success=True,processed_items=len(batch))
             time.sleep(SLEEP_BETWEEN_BATCHES_S)
         except Exception as error:
-            heartbeat.error(error); time.sleep(min(60,SLEEP_WHEN_IDLE_S))
+            heartbeat.error(error)
+            print(f"embedding worker error: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
+            # A long-lived psycopg connection can become unusable after a DB
+            # restart/network reset. Reconnect on the next iteration instead of
+            # retrying forever against the broken socket.
+            try:
+                if conn is not None and not conn.closed:
+                    conn.close()
+            except Exception:
+                pass
+            conn = None
+            time.sleep(min(60,SLEEP_WHEN_IDLE_S))
     progress.data["stopped_at"]=time.time(); progress.save(); heartbeat.update(state="IDLE",success=True); return 0
 
 if __name__ == "__main__": sys.exit(main())

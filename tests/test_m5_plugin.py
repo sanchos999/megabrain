@@ -5,12 +5,20 @@ Hermes runtime, so these tests run in the megabrain venv.
 """
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
 import pytest
 
-PLUGIN_DIR = Path.home() / ".hermes" / "plugins" / "megabrain"
+_PLUGIN_CANDIDATES = [
+    Path(os.environ["MEGABRAIN_HERMES_PLUGIN_DIR"])
+    if os.environ.get("MEGABRAIN_HERMES_PLUGIN_DIR") else None,
+    Path.home() / ".hermes" / "plugins" / "megabrain",
+    Path(__file__).resolve().parent.parent / "integrations" / "hermes",
+]
+PLUGIN_DIR = next((path for path in _PLUGIN_CANDIDATES if path and (path / "__init__.py").is_file()),
+                  Path.home() / ".hermes" / "plugins" / "megabrain")
 INIT = PLUGIN_DIR / "__init__.py"
 
 

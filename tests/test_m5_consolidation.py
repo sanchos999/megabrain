@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from consolidation.worker import _first_json_object
+from consolidation.worker import _first_json_object, extract_items
 from core.config import load_config
 from storage.pg import ALL_KINDS, EXPERIENCE_KINDS, BlobStore, Postgres
 
@@ -32,6 +32,18 @@ def test_first_json_object_repairs_extra_data():
     assert _first_json_object('{"a":1} trailing garbage') == {"a": 1}
     assert _first_json_object('   {"x": [1,2]}') == {"x": [1, 2]}
     assert _first_json_object("no json here") is None
+
+
+def test_empty_experience_shells_are_rejected():
+    events = [{"event_id": "evt_quality", "event_type": "ERROR",
+               "payload": {"text": "embedding worker failed after database restart"}}]
+
+    def transport(_body):
+        return ({"choices": [{"message": {"content":
+            '{"items":[{"kind":"FAILURE_PATTERN","title":"", "lesson":"",'
+            '"source_event_ids":["evt_quality"],"confidence":0.9}]}'}}]}, {}, {})
+
+    assert extract_items(events, transport)[0] == []
 
 
 def test_add_derived_item_dedupe_and_supersede():
