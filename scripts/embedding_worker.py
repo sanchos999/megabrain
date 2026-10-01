@@ -90,11 +90,32 @@ def fetch_item_batch(cur, limit):
     return [{"item_id":r[0],"content_hash":r[1],"text":r[2]} for r in cur.fetchall()]
 
 def maybe_build_hnsw(cur, progress):
-    if progress.data.get("hnsw_built"): return
-    cur.execute("select count(*) from memory_embeddings"); n=cur.fetchone()[0]
-    if n >= HNSW_ROW_THRESHOLD:
-        cur.execute("create index if not exists idx_memory_embeddings_hnsw on memory_embeddings using hnsw (embedding vector_cosine_ops) with (m=16,ef_construction=200)")
-        progress.data.update(hnsw_built=True,hnsw_rows=n)
+    """Build derived ANN indexes once, after the worker reaches idle."""
+    try:
+        cur.execute("select to_regclass('public.idx_memory_item_embeddings_hnsw')")
+        item_index = cur.fetchone()[0]
+        if item_index is None:
+            cur.execute("select count(*) from memory_item_embeddings where model_version=%s",
+                        (MODEL_VERSION,))
+            item_count = cur.fetchone()[0]
+            if item_count >= 1000:
+                cur.execute("""create index idx_memory_item_embeddings_hnsw
+                    on memory_item_embeddings using hnsw (embedding vector_cosine_ops)
+                    with (m=16,ef_construction=200)""")
+                progress.data.update(item_hnsw_built=True, item_hnsw_rows=item_count)
+        cur.execute("select to_regclass('public.idx_memory_embeddings_hnsw')")
+        raw_index = cur.fetchone()[0]
+        cur.execute("select count(*) from memory_embeddings where model_version=%s",
+                    (MODEL_VERSION,))
+        raw_count = cur.fetchone()[0]
+        if raw_index is None and raw_count >= HNSW_ROW_THRESHOLD:
+            cur.execute("""create index idx_memory_embeddings_hnsw
+                on memory_embeddings using hnsw (embedding vector_cosine_ops)
+                with (m=16,ef_construction=200)""")
+            progress.data.update(hnsw_built=True, hnsw_rows=raw_count)
+    except psycopg.errors.UndefinedTable:
+        # pgvector/canonical migrations may not exist on a legacy install.
+        return
 
 
 def main():
@@ -148,7 +169,7 @@ def main():
                 else:
                     rows=[(b["event_id"],b.get("project_id"),b["content_hash"],MODEL,MODEL_VERSION,DIM,v.tolist()) for b,v in zip(batch,vecs)]
                     cur.executemany("""insert into memory_embeddings(event_id,project_id,content_hash,model,model_version,dimension,embedding) values (%s,%s,%s,%s,%s,%s,%s) on conflict(event_id,model_version) do update set project_id=excluded.project_id,content_hash=excluded.content_hash,embedding=excluded.embedding,indexed_at=now() where memory_embeddings.content_hash!=excluded.content_hash""",rows)
-                progress.data["embedded"]+=len(batch); progress.data["batches"]+=1; progress.data["last_event_id"]=batch[-1].get("event_id") or batch[-1].get("item_id"); progress.data["last_batch_at"]=time.time(); maybe_build_hnsw(cur,progress); progress.save(); heartbeat.update(state="RUNNING",success=True,processed_items=len(batch))
+                progress.data["embedded"]+=len(batch); progress.data["batches"]+=1; progress.data["last_event_id"]=batch[-1].get("event_id") or batch[-1].get("item_id"); progress.data["last_batch_at"]=time.time(); progress.save(); heartbeat.update(state="RUNNING",success=True,processed_items=len(batch))
             time.sleep(SLEEP_BETWEEN_BATCHES_S)
         except Exception as error:
             heartbeat.error(error)

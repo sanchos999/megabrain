@@ -80,6 +80,7 @@ Measured production deployment: HOT resolve + capsule combined p50 about 9 ms, p
 ## Embeddings
 
 The embedding worker uses the local pinned `Xenova/bge-m3` ONNX INT8 model, dimension 1024, max length 512. `megabrain-embedding-worker.service` runs `scripts/ensure_embedding_model.py` before startup, downloads the pinned snapshot once into `models/bge-m3`, and then works offline. Model binaries are never included in Git or images. The worker uses bounded batching and CPU/memory limits; embeddings are derived and can be rebuilt from the PostgreSQL event log.
+For reproducibility, model inference is one text at a time while database writes remain batched; repeated same-input embeddings have cosine similarity above 0.999.
 
 ## Hermes adapter
 

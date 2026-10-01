@@ -18,9 +18,6 @@ BEGIN
         );
         CREATE INDEX IF NOT EXISTS idx_memory_item_embeddings_model
             ON memory_item_embeddings (model_version);
-        CREATE INDEX IF NOT EXISTS idx_memory_item_embeddings_hnsw
-            ON memory_item_embeddings USING hnsw (embedding vector_cosine_ops)
-            WITH (m=16, ef_construction=200);
     ELSE
         RAISE NOTICE 'pgvector extension not present; skipping memory_item_embeddings';
     END IF;
