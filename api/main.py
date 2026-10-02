@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import time
 from contextlib import asynccontextmanager
+from ipaddress import ip_address
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Security
@@ -382,6 +383,30 @@ class MemorySearchIn(BaseModel):
     mode: str | None = None          # NONE|HOT|WARM|DEEP; absent = deterministic
     limit: int = Field(default=10, ge=1, le=50)
     at_time: str | None = None       # ISO timestamp: historical query
+
+
+class EmbeddingBatchIn(BaseModel):
+    # Small chunks let interactive query embeddings interleave with backfill.
+    texts: list[str] = Field(min_length=1, max_length=8)
+
+
+@app.post("/v1/internal/embeddings", dependencies=[Depends(require_auth)])
+async def internal_embeddings(body: EmbeddingBatchIn, request: Request):
+    """Loopback-only worker endpoint reusing the API's already-loaded ONNX session."""
+    client = request.client
+    try:
+        is_loopback = bool(client and ip_address(client.host).is_loopback)
+    except ValueError:
+        is_loopback = False
+    if not is_loopback:
+        raise HTTPException(status_code=403, detail="loopback clients only")
+    if any(not text.strip() or len(text) > 4000 for text in body.texts):
+        raise HTTPException(status_code=422, detail="texts must be non-empty and at most 4000 chars")
+
+    from benchmark.onnx_embed import EMBEDDING_MODEL_VERSION
+
+    vectors = await run_in_threadpool(_get_retriever().encode_documents, body.texts)
+    return {"model_version": EMBEDDING_MODEL_VERSION, "vectors": vectors}
 
 
 @app.post("/v1/memory/search", dependencies=[Depends(require_auth)])

@@ -149,8 +149,13 @@ def _doctor() -> dict:
     usage = shutil.disk_usage(Path.home())
     checks["disk_free_gb"] = round(usage.free / 2**30, 1)
     checks["disk"] = "PASS" if usage.free / usage.total > 0.1 else "WARN"
-    model_dir = Path(os.environ.get("U2NET_HOME", "")) if os.environ.get("U2NET_HOME") else None
-    checks["model_dir"] = ("PASS" if (model_dir and model_dir.exists()) else "UNKNOWN") if model_dir else "UNKNOWN"
+    configured_model_dir = (
+        os.environ.get("MB_ONNX_MODEL_DIR")
+        or os.environ.get("U2NET_HOME")
+        or str(Path(__file__).resolve().parent.parent / "models" / "bge-m3")
+    )
+    model_dir = Path(configured_model_dir).expanduser()
+    checks["model_dir"] = "PASS" if model_dir.is_dir() else "FAIL"
     try:
         Path(os.environ.get("MB_STATE_DIR", str(Path(__file__).parent.parent / "state"))).mkdir(parents=True, exist_ok=True)
         checks["fs_writable"] = "PASS"

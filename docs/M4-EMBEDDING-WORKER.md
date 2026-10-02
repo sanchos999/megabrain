@@ -17,7 +17,8 @@ megabrain-embedding-worker.service (systemd user unit)
 - Idempotency: (event_id, content_hash, model_version); пересчёт только
   при смене content_hash (update), иначе skip
 - Scope: все events с непустым payload->>'text' (left 4000 chars)
-- Model: xenova-bge-m3-onnx-int8-512-cls-v4, 1024d, local pinned ONNX int8, max_length=512
+- Model: xenova-bge-m3-onnx-int8-512-cls-v4, 1024d, local pinned ONNX int8, max_length=512; resident only in the API process
+- Inference transport: authenticated loopback `POST /v1/internal/embeddings`, default chunks of 2 (maximum 8)
 - Single instance: flock state/embedding-worker.lock
 - SIGTERM-safe: finishing current batch → progress save → exit 0
 - Progress: state/embedding-worker.json (после каждого батча)
@@ -32,11 +33,12 @@ megabrain-embedding-worker.service (systemd user unit)
     IOSchedulingClass=idle
     TimeoutStopSec=600
 
-Параметры по умолчанию для systemd: `MB_EMB_THREADS=6`, `MB_EMB_BATCH=64`,
+Параметры для systemd: `MB_EMB_BATCH=64`, `MB_EMB_API_CHUNK=2`,
 `MB_EMB_SLEEP_S=0.05`. Из-за batch-зависимости этого ONNX-экспорта каждый
-текст кодируется отдельным inference (batch настраивает только размер
-database-commit); query использует тот же one-text путь. Dynamic padding
-ускоряет короткие сообщения, а `MemoryMax=4G` защищает API и PostgreSQL.
+текст кодируется отдельным inference; API объединяет запросы фонового worker
+с interactive retrieval на одной ONNX-сессии, сохраняя one-text inference.
+API prewarm загружает модель до первой пользовательской выдачи, а worker больше
+не резервирует под неё отдельный гигабайт памяти.
 
 ## Backfill
 

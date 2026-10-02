@@ -10,7 +10,8 @@ if [ -f "$env_file" ]; then
   . "$env_file"
   set +a
 fi
-check(){ printf '%-14s' "$1"; shift; if "$@" >/dev/null 2>&1; then echo PASS; else echo FAIL; fi; }
+failures=0
+check(){ printf '%-24s' "$1"; shift; if "$@" >/dev/null 2>&1; then echo PASS; else echo FAIL; failures=$((failures + 1)); fi; }
 redis_check(){
   "$root/.venv/bin/python" - "$1" <<'PY'
 import socket
@@ -32,8 +33,21 @@ with socket.create_connection((host, port), timeout=3) as s:
 PY
 }
 check api curl -fsS "$base/health"
+check model-router curl -fsS "${MODEL_ROUTER_HEALTH_URL:-http://127.0.0.1:4200/health}"
 check postgres pg_isready -h "${PGHOST:-127.0.0.1}" -p "${PGPORT:-5432}"
 check redis redis_check "${MEGABRAIN_REDIS_URL:-redis://127.0.0.1:6390/0}"
+if command -v systemctl >/dev/null 2>&1; then
+  check megabrain-api systemctl --user is-active megabrain.service
+  check embedding-worker systemctl --user is-active megabrain-embedding-worker.service
+  check consolidation-worker systemctl --user is-active megabrain-consolidation-worker.service
+  check hermes-outbox systemctl --user is-active megabrain-hermes-outbox.service
+fi
 model_dir="${MB_ONNX_MODEL_DIR:-${MEGABRAIN_MODEL_DIR:-$root/models/bge-m3}}"
-check model test -s "$model_dir/onnx/model_quantized.onnx" && test -s "$model_dir/tokenizer.json"
+check model test -s "$model_dir/onnx/model_quantized.onnx"
+check tokenizer test -s "$model_dir/tokenizer.json"
 check disk test "$(df -P . | awk 'NR==2 {print $4}')" -gt 1048576
+if [ "$failures" -gt 0 ]; then
+  printf 'Preflight failed: %s check(s)\n' "$failures" >&2
+  exit 1
+fi
+echo 'Preflight passed'

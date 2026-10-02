@@ -209,6 +209,20 @@ class HybridRetriever:
             self._local.vector_error = type(error).__name__
             return None
 
+    def encode_documents(self, texts: list[str]) -> list[list[float]]:
+        """Encode independent documents using the API process's shared ONNX session.
+
+        The pinned export is not batch-content invariant, so each text is inferred
+        separately even when callers send a small transport batch.
+        """
+        if self._embedder is None:
+            from benchmark.onnx_embed import OnnxBgeM3
+            self._embedder = OnnxBgeM3(threads=int(self.cfg.get("onnx_threads", 2)))
+        return [
+            self._embedder.encode([text[:MAX_DOC_CHARS]], max_length=MAX_LEN)[0].tolist()
+            for text in texts
+        ]
+
     # --- SQL helpers ----------------------------------------------------
 
     @staticmethod

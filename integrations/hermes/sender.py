@@ -48,6 +48,7 @@ class Sender:
         self.batch_size = batch_size
         self.heartbeat_interval_s = heartbeat_interval_s
         self._processed = 0
+        self._reported_processed = 0
         self._last_error_class: str | None = None
         self._last_heartbeat = 0.0
         self._thread: threading.Thread | None = None
@@ -59,22 +60,11 @@ class Sender:
             return
         self._last_heartbeat = time.time()
         try:
+            processed_delta = self._processed - self._reported_processed
             self.client.worker_heartbeat(
-                component="outbox", state=state, processed_items=self._processed,
+                component="outbox", state=state, processed_items=processed_delta,
                 success=self._last_error_class is None, error_class=self._last_error_class)
-            self._last_error_class = None
-        except Exception:  # noqa: BLE001 — heartbeat must never kill delivery
-            pass
-
-    def _heartbeat(self, state: str) -> None:
-        """Durable heartbeat via MegaBrain API (never blocks delivery on failure)."""
-        if time.time() - self._last_heartbeat < self.heartbeat_interval_s:
-            return
-        self._last_heartbeat = time.time()
-        try:
-            self.client.worker_heartbeat(
-                component="outbox", state=state, processed_items=self._processed,
-                success=self._last_error_class is None, error_class=self._last_error_class)
+            self._reported_processed = self._processed
             self._last_error_class = None
         except Exception:  # noqa: BLE001 — heartbeat must never kill delivery
             pass

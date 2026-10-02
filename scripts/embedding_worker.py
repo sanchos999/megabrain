@@ -7,6 +7,7 @@ import os
 import signal
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 import psycopg
@@ -22,9 +23,8 @@ MODEL_VERSION = EMBEDDING_MODEL_VERSION
 MODEL = "bge-m3-int8-onnx"
 DIM = 1024
 MAX_DOC_CHARS = 4000
-MAX_LEN = 512
-ONNX_THREADS = int(os.environ.get("MB_EMB_THREADS", "4"))
 BATCH = int(os.environ.get("MB_EMB_BATCH", "64"))
+API_EMBED_CHUNK = max(1, min(8, int(os.environ.get("MB_EMB_API_CHUNK", "2"))))
 SLEEP_BETWEEN_BATCHES_S = float(os.environ.get("MB_EMB_SLEEP_S", "2.0"))
 SLEEP_WHEN_IDLE_S = float(os.environ.get("MB_EMB_IDLE_SLEEP_S", "30.0"))
 HNSW_ROW_THRESHOLD = 50000
@@ -117,6 +117,35 @@ def maybe_build_hnsw(cur, progress):
         # pgvector/canonical migrations may not exist on a legacy install.
         return
 
+def encode_via_api(texts, cfg):
+    """Use MegaBrain API's resident ONNX session; never load a second model here."""
+    from benchmark.onnx_embed import EMBEDDING_MODEL_VERSION
+
+    host = cfg.get("bind_host") or "127.0.0.1"
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    base_url = os.environ.get("MB_BASE_URL") or os.environ.get("MEGABRAIN_API_URL")
+    if not base_url:
+        base_url = f"http://{host}:{cfg.get('bind_port', 4300)}"
+    payload = json.dumps({"texts": texts}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if cfg.get("api_token"):
+        headers["Authorization"] = f"Bearer {cfg['api_token']}"
+    request = urllib.request.Request(
+        base_url.rstrip("/") + "/v1/internal/embeddings",
+        data=payload,
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=180) as response:
+        result = json.loads(response.read())
+    vectors = result.get("vectors")
+    if (result.get("model_version") != EMBEDDING_MODEL_VERSION
+            or not isinstance(vectors, list) or len(vectors) != len(texts)
+            or any(not isinstance(vector, list) or len(vector) != DIM for vector in vectors)):
+        raise RuntimeError("embedding API returned an incompatible response")
+    return vectors
+
 
 def main():
     signal.signal(signal.SIGTERM,_handle_term); signal.signal(signal.SIGINT,_handle_term)
@@ -137,11 +166,7 @@ def main():
     except Exception as error:
         heartbeat.error(error); print(f"embedding database init failed: {type(error).__name__}: {error}",flush=True); return 1
     progress=Progress(STATE/"embedding-worker.json").load()
-    try:
-        from benchmark.onnx_embed import OnnxBgeM3
-        model=OnnxBgeM3(threads=ONNX_THREADS)
-    except Exception as error:
-        heartbeat.error(error); print(f"embedding model init failed: {type(error).__name__}",flush=True); return 1
+    print(f"embedding worker using shared model via {os.environ.get('MB_BASE_URL', 'local API')}", flush=True)
     while not _stop:
         try:
             if conn is None or conn.closed:
@@ -158,11 +183,15 @@ def main():
                 batch = item_batch or fetch_batch(cur, BATCH)
                 if not batch:
                     maybe_build_hnsw(cur,progress); progress.data["last_batch_at"]=time.time(); progress.save(); heartbeat.update(state="IDLE",success=True); time.sleep(SLEEP_WHEN_IDLE_S); continue
-                # Xenova's quantized ONNX export changes a sample slightly
-                # when unrelated samples share its batch. One-text inference
-                # keeps index vectors exactly compatible with query vectors;
-                # BATCH still amortizes the database round-trip.
-                vecs=[model.encode([b["text"]], max_length=MAX_LEN)[0] for b in batch]
+                # Each text remains an independent inference (required for this
+                # export's reproducibility); small RPC chunks share the API's
+                # resident session and leave room for interactive queries.
+                vecs=[]
+                for start in range(0, len(batch), API_EMBED_CHUNK):
+                    chunk=batch[start:start + API_EMBED_CHUNK]
+                    vecs.extend(encode_via_api([b["text"] for b in chunk], cfg))
+                    if start + API_EMBED_CHUNK < len(batch):
+                        time.sleep(0.01)
                 if item_batch:
                     rows=[(b["item_id"],b["content_hash"],MODEL,MODEL_VERSION,DIM,v.tolist()) for b,v in zip(batch,vecs)]
                     cur.executemany("""insert into memory_item_embeddings(item_id,content_hash,model,model_version,dimension,embedding) values (%s,%s,%s,%s,%s,%s) on conflict(item_id,model_version) do update set content_hash=excluded.content_hash,embedding=excluded.embedding,indexed_at=now() where memory_item_embeddings.content_hash!=excluded.content_hash""",rows)
