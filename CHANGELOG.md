@@ -2,6 +2,28 @@
 
 Все значимые изменения проекта фиксируются здесь. Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/).
 
+## [0.2.1] - 2026-10-03
+
+### Исправлено
+- Воркер эмбеддингов падал с `AttributeError: 'list' object has no attribute
+  'tolist'`: ответ API `/v1/internal/embeddings` (JSON) приводится к ndarray.
+  До фикса shared-ONNX путь не индексировал ни одного события.
+- Идентичность события `TURN_STARTED` теперь включает текст сообщения:
+  при возобновлении сессии счётчик ходов начинается заново, и новое сообщение
+  коллизировало со старым `event_id` — MegaBrain навсегда отклонял его
+  (`exists with different payload_hash`), событие уходило в DLQ (274 открытых).
+- В репозиторий добавлен регрессионный тест `tests/test_event_identity.py`.
+
+### Fixed (English)
+- Embedding worker crashed with `AttributeError: 'list' object has no attribute
+  'tolist'` because the JSON response of `/v1/internal/embeddings` was used
+  directly; the shared-ONNX path now indexes events.
+- `TURN_STARTED` event identity now includes the message text: a resumed session
+  restarts its turn counter, so a new message collided with an older `event_id`
+  and was rejected permanently (`exists with different payload_hash`), filling
+  the dead-letter queue (274 open entries).
+- Added regression coverage in `tests/test_event_identity.py`.
+
 ## [0.2.0] - 2026-10-01
 
 ### Добавлено

@@ -25,7 +25,7 @@ from projects.resolver import ProjectResolver
 from retrieval.capsule import CapsuleBuilder
 from storage.pg import BlobStore, Postgres
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 bearer = HTTPBearer(auto_error=False)
 

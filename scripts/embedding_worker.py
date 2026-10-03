@@ -10,6 +10,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+import numpy as np
 import psycopg
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -144,7 +145,9 @@ def encode_via_api(texts, cfg):
             or not isinstance(vectors, list) or len(vectors) != len(texts)
             or any(not isinstance(vector, list) or len(vector) != DIM for vector in vectors)):
         raise RuntimeError("embedding API returned an incompatible response")
-    return vectors
+    # JSON gives plain lists; callers index and call .tolist(), so hand back
+    # the same ndarray type the in-process encoder returned.
+    return np.asarray(vectors, dtype=np.float32)
 
 
 def main():

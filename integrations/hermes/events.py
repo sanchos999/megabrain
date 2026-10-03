@@ -129,7 +129,11 @@ def error(session_id: str, message: str, *, project_id=None, turn_id=None,
 
 def turn_started(session_id: str, turn_number: int, message: str, *,
                  project_id=None, channel="cli") -> dict:
-    eid = _event_id("TURN_STARTED", session_id, str(turn_number))
+    # turn_number alone is not unique: a resumed/reloaded session restarts it
+    # while session_id stays the same, so the message must be part of the
+    # identity — otherwise a new turn collides with an old one and MegaBrain
+    # permanently rejects it with "exists with different payload_hash".
+    eid = _event_id("TURN_STARTED", session_id, str(turn_number), message)
     return base("TURN_STARTED", session_id, channel=channel,
                 project_id=project_id, event_id=eid,
                 payload={"turn_number": turn_number, "message": message})
