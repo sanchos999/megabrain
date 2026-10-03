@@ -4,6 +4,14 @@
 
 ## [0.2.1] - 2026-10-03
 
+### Совместимость тестового стека
+- FastAPI/Starlette TestClient теперь использует `httpx2`; закреплена зависимость `httpx2>=2.13,<3`.
+- Обновлены Starlette `1.7.0` и httpx2 `2.13.1`; прежние предупреждения совместимости исчезли.
+
+### Test stack compatibility
+- FastAPI/Starlette TestClient now uses `httpx2`; pinned dependency `httpx2>=2.13,<3`.
+- Starlette `1.7.0` and httpx2 `2.13.1` remove the previous compatibility warnings.
+
 ### Исправлено
 - Воркер эмбеддингов падал с `AttributeError: 'list' object has no attribute
   'tolist'`: ответ API `/v1/internal/embeddings` (JSON) приводится к ndarray.
