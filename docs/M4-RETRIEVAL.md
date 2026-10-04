@@ -67,9 +67,10 @@ Supersession: memory_items.supersedes_id + valid_to; item_key
 Queries containing one explicit identifier (`item_key`) first try an indexed
 lookup of high-confidence current explicit memory. For `topic: phrase` and
 short non-question topic queries, FTS can also skip vectors only when the full
-phrase literally matches the returned high-confidence current memory text.
-Ambiguous, historical, deep, or unmatched queries retain the full hybrid FTS +
-vector path.
+phrase literally matches the returned high-confidence current memory text. A
+small allowlist of unambiguous Russian/English question shells may be reduced to
+their explicit subject, under the same literal-match guard. Ambiguous,
+historical, deep, or unmatched queries retain the full hybrid FTS + vector path.
 
 ## Historical performance (production, 2026-10-01, before exact-topic fast path)
 
@@ -111,6 +112,25 @@ occurred. Server latency was p50/p95 37.8/115.3 ms and HTTP latency was
 39.7/117.1 ms. The sample is small and old, and has no relevance labels, so this
 measures routing and latency only—not answer quality. Query text was neither
 printed nor persisted by the replay.
+
+### CPU embedding-model experiment (2026-10-04, not deployed)
+
+On the Xeon Platinum 8260, the pinned official
+[multilingual-e5-small model](https://huggingface.co/intfloat/multilingual-e5-small)
+has a 384-dimensional INT8 AVX-512 VNNI ONNX export (118.3 MB), versus the
+current BGE-M3 export (569.7 MB). Its in-process query embedding median was
+5.1 ms; the current model's loopback embedding endpoint median was 27.8 ms.
+These timings are directional, not a strictly identical harness.
+
+A project-scoped vector-only proxy used 600 held-out explicit current memories
+and 3,484 indexed current items. BGE-M3 vs E5-small: Recall@5 99.83% vs 99.50%,
+Recall@10 100% vs 99.67%, MRR 0.9964 vs 0.9942. A separate disjoint 600-query
+set tested a confidence rule (cosine >=0.80 and top-1/top-2 margin >=0.02): it
+accepted 538/600 with no wrong top-1 in that synthetic set. However, on the 15
+archived WARM traces the rule accepted only two; both appeared in the current
+BGE top-10, one at top-1. These synthetic/limited trace results do not establish
+general semantic quality. E5 is therefore an experiment only; production remains
+on BGE-M3 until a broader judged trace set and shadow-index rollout validate it.
 
 ## Context Capsule integration
 

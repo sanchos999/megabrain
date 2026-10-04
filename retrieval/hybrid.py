@@ -335,6 +335,26 @@ class HybridRetriever:
         return None
 
     @staticmethod
+    def _question_topic(query: str) -> str | None:
+        """Extract only a literal subject from common, unambiguous question shells."""
+        normalized = " ".join((query or "").strip().split())
+        patterns = (
+            r"^(?:какое решение приняли|что мы решили|что решили)\s+(?:по(?:\s+теме)?|насч[её]т|про)\s+(.+?)[?.!]*$",
+            r"^(?:какие ограничения(?: нужно соблюдать)?|какие правила(?: нельзя нарушать)?)\s+(?:для|по(?:\s+теме)?|при работе с)\s+(.+?)[?.!]*$",
+            r"^(?:что нужно сделать|какой следующий шаг(?: остался)?)\s+(?:по(?:\s+задаче|\s+теме)?|для|с)\s+(.+?)[?.!]*$",
+            r"^(?:what did we decide about|what decision did we make about|what did we choose for)\s+(.+?)[?.!]*$",
+            r"^(?:which constraints apply to|what rules apply to|what needs to be done for|what is the next step for)\s+(.+?)[?.!]*$",
+        )
+        for pattern in patterns:
+            match = re.match(pattern, normalized, flags=re.IGNORECASE)
+            if match:
+                candidate = " ".join(match.group(1).strip(" `\"'()[]{}").split())
+                topic = HybridRetriever._short_topic(candidate)
+                if topic:
+                    return topic
+        return None
+
+    @staticmethod
     def _exact_item_key(query: str) -> str | None:
         """Return one explicit identifier or a delimited item-key phrase."""
         topic = HybridRetriever._delimited_topic(query)
@@ -386,10 +406,11 @@ class HybridRetriever:
         try:
             with conn.cursor() as cur:
                 key = self._exact_item_key(query)
-                topic = self._delimited_topic(query) or (None if key else self._short_topic(query))
+                topic = (self._delimited_topic(query) or self._question_topic(query)
+                         or (None if key else self._short_topic(query)))
                 history_request = any(marker in query.lower() for marker in (
                     "раньше", "предыдущ", "истори", "до этого", "прошл", "было", "были", "был",
-                    "previous", "earlier", "history", "before", "prior", "last year", "old",
+                    "previous", "earlier", "history", "before", "prior", "last year", "last time", "old",
                 ))
                 exact_rows = []
                 if (key or topic) and not deep and at_time is None and not history_request:

@@ -68,6 +68,24 @@ def test_exact_item_key_detection_requires_one_explicit_identifier():
     assert HybridRetriever._short_topic("Hermes") is None
 
 
+def test_question_topic_extracts_only_supported_unambiguous_subjects():
+    assert HybridRetriever._question_topic(
+        "Какие ограничения нужно соблюдать для MegaBrain retrieval?"
+    ) == "MegaBrain retrieval"
+    assert HybridRetriever._question_topic(
+        "Что мы решили по теме memory compaction?"
+    ) == "memory compaction"
+    assert HybridRetriever._question_topic(
+        "What did we decide about memory indexing?"
+    ) == "memory indexing"
+    assert HybridRetriever._question_topic(
+        "What is the next step for embedding worker?"
+    ) == "embedding worker"
+    assert HybridRetriever._question_topic("Что мы решили раньше по Hermes?") is None
+    assert HybridRetriever._question_topic("What happened to Hermes last year?") is None
+    assert HybridRetriever._question_topic("Что делать с этим?") is None
+
+
 def test_exact_current_item_key_skips_onnx_but_keeps_provenance():
     row = (
         "item:item-1", "event-1", "item-1", None, "project-1", "MEMORY_ITEM",
@@ -159,6 +177,53 @@ def test_delimited_topic_requires_literal_high_confidence_fts_match():
     assert conn.cursor_value.calls[0][1]["q"] == "memory consolidation policy"
     assert result["vector_skipped"] == "exact_item_topic"
     assert result["results"][0]["memory_item_id"] == "item-2"
+
+
+def test_supported_question_shell_uses_same_literal_topic_guard():
+    row = (
+        "item:item-3", "event-3", "item-3", None, "project-1", "MEMORY_ITEM",
+        "CONSTRAINT", datetime.now(UTC), "MegaBrain retrieval latency target",
+        ["event-3"], 0.99, datetime.now(UTC), None, False,
+    )
+
+    class Cursor:
+        def __init__(self):
+            self.calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+
+        def fetchall(self):
+            return [row]
+
+    class Connection:
+        def __init__(self):
+            self.cursor_value = Cursor()
+
+        def cursor(self):
+            return self.cursor_value
+
+    retriever = HybridRetriever({"retrieval_query_cache_max": 0})
+    conn = Connection()
+    retriever._connection = lambda: conn
+    retriever._encode_query = lambda _query: (_ for _ in ()).throw(
+        AssertionError("a literal current topic should skip ONNX"))
+
+    result = retriever.search(
+        "Какие ограничения нужно соблюдать для MegaBrain retrieval?",
+        mode="WARM", limit=5, project_id="project-1",
+    )
+
+    assert len(conn.cursor_value.calls) == 1
+    assert conn.cursor_value.calls[0][1]["q"] == "MegaBrain retrieval"
+    assert result["vector_skipped"] == "exact_item_topic"
+    assert result["results"][0]["memory_item_id"] == "item-3"
 
 
 def test_unmatched_explicit_key_falls_back_to_semantic_hybrid_search():
