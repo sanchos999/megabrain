@@ -211,7 +211,10 @@ benefit depends on how often identical cold queries overlap. A loopback cold
 canary sent 12 identical concurrent searches: all 12 returned HTTP 200, while
 the counters recorded one encoder call, 11 coalesced waiters, and zero failures.
 The 105/109 ms median/max here includes concurrent database searches and is not
-a before/after latency claim.
+a before/after latency claim. A separate eight-distinct-query probe also
+returned 8/8 HTTP 200 and recorded eight independent encoder calls, zero
+coalesced waiters, and zero failures (server p50/max 100/107 ms), confirming
+that unrelated cold queries are not globally serialized.
 
 ### Post-rollout spot check (2026-10-04)
 
