@@ -51,6 +51,11 @@ LLM никогда не объявляет confirmed fact. Каждый derived 
   проходов ограничена обычным минутным poll, а все LLM rate/budget guards
   остаются неизменными. Новые события с `technical_echo` также не попадают в
   очередь, поскольку заведомо исключены из извлечения.
+- Live queue-drain check (2026-10-05): seven stale pending counters had zero
+  eligible post-cursor meaningful events. As each small-batch idle window
+  elapsed, the active worker advanced the watermarks and drained the backlog
+  from seven projects to zero without any LLM call; no failed consolidation run
+  was recorded. This confirms the noise-only drain path in production.
 
 ## Retrieval (M5 §18)
 
