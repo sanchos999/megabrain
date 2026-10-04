@@ -297,7 +297,11 @@ spiked to 3.1 s; an immediate warm replay of the same 229-pair sample measured
 session. This correlation points to cold model initialization, not query
 length, as the likely outlier cause. When that optional route is enabled,
 startup now prewarms E5 as well as BGE; a failed E5 prewarm is counted and BGE
-remains available as fallback.
+remains available as fallback. The next process startup reported both prewarm
+counters successful. A post-prewarm repeat over 227 source queries remained
+224/227 top-5 with zero project leaks/vector failures; the four >512-character
+queries measured 256 ms median/296 ms p95. No multi-second outlier recurred in
+that repeat, though four observations are too few for an SLA claim.
 
 ## Context Capsule integration
 
