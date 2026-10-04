@@ -309,6 +309,11 @@ top-1); enabling the confidence-gated E5 route returned 224 top-5 (223 top-1),
 and the E5 route was selected once. This small proxy gain supports retaining
 the guard, not broadening it; the comparison is not human-labeled.
 
+The same read-only index audit found all 4,434 current canonical memory items
+embedded with the pinned BGE version and all 4,350 eligible explicit
+DECISION/CONSTRAINT/TASK items present in the E5 side index (zero missing in
+both sets).
+
 ## Context Capsule integration
 
 Capsule не заменяется vector-результатами. Structured current state имеет
