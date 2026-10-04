@@ -81,17 +81,26 @@ def worker_rows(pg) -> dict:
 
 def scheduler_backlog(pg) -> dict:
     """Queue + progress inputs for the watchdog (§8): backlog beyond the absolute
-    max wait with no valid wait reason means STUCK, not IDLE."""
+    max wait with no valid wait reason and no recent successful progress means STUCK,
+    not IDLE. ``first_dirty_at`` is retained across partial batches, so by itself it
+    must not mark a project stalled while its worker is actively making progress."""
     with pg.conn.cursor() as cur:
         cur.execute("""SELECT count(*),COALESCE(sum(pending_event_count),0),
                               COALESCE(max(extract(epoch from (now()-first_dirty_at))),0),
-                              COALESCE(bool_or(paused OR budget_paused OR rate_paused
-                                  OR last_block_reason IN ('RATE_LIMIT_HOURLY','RATE_LIMIT_DAILY','TOKEN_BUDGET_DAILY','BUDGET')),false)
-                       FROM consolidation_projects WHERE pending_event_count>0""")
-        projects, pending, oldest_age_s, valid_wait = cur.fetchone()
+                              COALESCE(bool_or(
+                                  extract(epoch from (now()-first_dirty_at)) > %s
+                                  AND next_eligible_at <= now()
+                                  AND NOT (paused OR budget_paused OR rate_paused
+                                      OR last_block_reason IN ('RATE_LIMIT_HOURLY','RATE_LIMIT_DAILY','TOKEN_BUDGET_DAILY','BUDGET'))
+                                  AND (last_success_at IS NULL
+                                      OR extract(epoch from (now()-last_success_at)) > %s)
+                              ),false)
+                       FROM consolidation_projects WHERE pending_event_count>0""",
+                   (ABS_MAX_WAIT_S, ABS_MAX_WAIT_S))
+        projects, pending, oldest_age_s, overdue = cur.fetchone()
         return {"dirty_projects": int(projects), "pending_events": int(pending),
                 "oldest_pending_age_s": float(oldest_age_s),
-                "overdue": bool(int(projects) and float(oldest_age_s) > ABS_MAX_WAIT_S and not valid_wait)}
+                "overdue": bool(overdue)}
 
 
 def dead_letter_stats(path: str) -> dict:
