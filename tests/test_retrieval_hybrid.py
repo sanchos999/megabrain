@@ -63,6 +63,8 @@ def test_exact_item_key_detection_requires_one_explicit_identifier():
     assert HybridRetriever._exact_item_key("Какие ограничения для темы: память консолидации?") == "память консолидации"
     assert HybridRetriever._exact_item_key("vector_backend vs API_KEY") is None
     assert HybridRetriever._exact_item_key("what changed in version 2026?") is None
+    assert HybridRetriever._short_topic("memory consolidation policy") == "memory consolidation policy"
+    assert HybridRetriever._short_topic("Что мы решили раньше?") is None
 
 
 def test_exact_current_item_key_skips_onnx_but_keeps_provenance():

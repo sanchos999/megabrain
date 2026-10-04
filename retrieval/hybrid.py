@@ -322,6 +322,19 @@ class HybridRetriever:
                 return candidate
 
     @staticmethod
+    def _short_topic(query: str) -> str | None:
+        candidate = " ".join((query or "").strip(" `\"'()[]{}?!.,;").split())
+        words = candidate.split()
+        question_starters = {
+            "что", "что-то", "как", "какой", "какая", "какие", "какую", "каким",
+            "где", "когда", "почему", "зачем", "кто", "сколько", "was", "were",
+            "what", "which", "where", "when", "why", "how", "who", "does", "did",
+        }
+        if 1 <= len(words) <= 10 and words[0].casefold() not in question_starters:
+            return candidate
+        return None
+
+    @staticmethod
     def _exact_item_key(query: str) -> str | None:
         """Return one explicit identifier or a delimited item-key phrase."""
         topic = HybridRetriever._delimited_topic(query)
@@ -373,12 +386,12 @@ class HybridRetriever:
         try:
             with conn.cursor() as cur:
                 key = self._exact_item_key(query)
-                topic = self._delimited_topic(query)
+                topic = self._delimited_topic(query) or (None if key else self._short_topic(query))
                 history_request = any(marker in query.lower() for marker in (
                     "раньше", "предыдущ", "истори", "до этого", "previous", "earlier", "history", "before",
                 ))
                 exact_rows = []
-                if key and not deep and at_time is None and not history_request:
+                if (key or topic) and not deep and at_time is None and not history_request:
                     item_extra, item_params = self._item_where(False, project_id, session_id, None)
                     if topic:
                         cur.execute(
@@ -398,7 +411,7 @@ class HybridRetriever:
                         if exact_rows:
                             vector_skipped = True
                             vector_skip_reason = "exact_item_topic"
-                    if not exact_rows:
+                    if not exact_rows and key:
                         cur.execute(
                             self.ITEM_KEY_SQL + item_extra
                             + " order by mi.confidence desc, mi.valid_from desc limit %(lim)s",

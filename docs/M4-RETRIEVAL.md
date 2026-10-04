@@ -65,10 +65,11 @@ Supersession: memory_items.supersedes_id + valid_to; item_key
 | Redis down | PG fallback, mode=DEGRADED (M1) |
 
 Queries containing one explicit identifier (`item_key`) first try an indexed
-lookup of high-confidence current explicit memory. For `topic: phrase` queries,
-the FTS path can also skip vectors only when the full phrase literally matches
-the returned high-confidence current memory text. Ambiguous, historical, deep,
-or unmatched queries retain the full hybrid FTS + vector path.
+lookup of high-confidence current explicit memory. For `topic: phrase` and
+short non-question topic queries, FTS can also skip vectors only when the full
+phrase literally matches the returned high-confidence current memory text.
+Ambiguous, historical, deep, or unmatched queries retain the full hybrid FTS +
+vector path.
 
 ## Performance (production, 2026-10-01, after v4 backfill)
 

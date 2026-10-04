@@ -129,7 +129,7 @@ def _evaluate(retriever: HybridRetriever, records: list[dict], *, fts_key_only: 
     }
 
 
-def _evaluate_api(records: list[dict], token: str) -> dict:
+def _evaluate_api(records: list[dict], token: str, *, topic_only: bool = False) -> dict:
     times: list[float] = []
     server_times: list[float] = []
     fast_http: list[float] = []
@@ -141,7 +141,8 @@ def _evaluate_api(records: list[dict], token: str) -> dict:
     for index, record in enumerate(records, 1):
         # Trailing whitespace is tokenizer-equivalent but defeats the exact
         # query-vector cache, so semantic fallback timings remain cache-cold.
-        query = record["question"] + " " * index
+        base_query = record["fts_query"] if topic_only else record["question"]
+        query = base_query + " " * index
         payload = json.dumps({
             "query": query, "mode": "WARM", "limit": 50,
             "project_id": record["project_id"],
@@ -224,6 +225,7 @@ def run() -> int:
     finally:
         retriever._drop_connection()
     api_metrics = _evaluate_api(records, token)
+    topic_api_metrics = _evaluate_api(records, token, topic_only=True)
     result = {
         "evaluation": "generated questions from explicit current memories; proxy, not human-judged",
         "queries": len(records),
@@ -231,6 +233,7 @@ def run() -> int:
         "natural_query_fts_only_diagnostic": fts_only_metrics,
         "metrics": metrics,
         "production_api_metrics": api_metrics,
+        "production_api_topic_metrics": topic_api_metrics,
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     unsafe = metrics["project_leaks"] or metrics["vector_degraded_queries"]
