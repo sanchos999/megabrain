@@ -229,6 +229,13 @@ sample, so the guarded route is not widened. Truncation probes likewise hit
 21/22 here, but the earlier 68-pair sample lost a hit when truncated; full query
 text therefore remains the production behavior.
 
+The repeatable E5 source probe now also reports a confidence-threshold sweep.
+On the 45-pair sample, the current 0.80/0.02 gate accepted 45 and hit top-5 for
+44; BGE also hit 44/45. An exploratory 0.82/0.04 threshold accepted 11/45 and
+hit top-5 for all 11 (0.85/0.05 accepted 6/45, all hits). Because the thresholds
+were swept on this same small sample, this is exploratory only; no production
+E5 threshold or route was changed.
+
 ## Context Capsule integration
 
 Capsule не заменяется vector-результатами. Structured current state имеет

@@ -359,6 +359,7 @@ def _e5_source_probe(records: list[dict], dsn: str, token: str) -> dict:
 
     ranks: list[int | None] = []
     accepted_ranks: list[int | None] = []
+    confidence_rows: list[tuple[float | None, float | None, int | None]] = []
     with psycopg.connect(dsn, autocommit=True) as conn:
         if conn.execute("SHOW transaction_read_only").fetchone()[0] != "on":
             raise RuntimeError("Database connection is not read-only.")
@@ -381,10 +382,27 @@ def _e5_source_probe(records: list[dict], dsn: str, token: str) -> dict:
                          if row[0] == record["item_id"]), None)
             ranks.append(rank)
             if len(rows) >= 2:
-                confident = (float(rows[0][1]) >= 0.80
-                             and float(rows[0][1]) - float(rows[1][1]) >= 0.02)
+                best = float(rows[0][1])
+                margin = best - float(rows[1][1])
+                confident = (best >= 0.80 and margin >= 0.02)
                 if confident:
                     accepted_ranks.append(rank)
+                confidence_rows.append((best, margin, rank))
+            else:
+                confidence_rows.append((None, None, rank))
+
+    gate_sweep = {}
+    for minimum, margin_minimum in ((0.80, 0.02), (0.82, 0.04), (0.85, 0.05), (0.88, 0.08)):
+        accepted = [rank for best, margin, rank in confidence_rows
+                    if best is not None and margin is not None
+                    and best >= minimum and margin >= margin_minimum]
+        gate_sweep[f"{minimum:.2f}/{margin_minimum:.2f}"] = {
+            "accepted": len(accepted),
+            "accepted_target_hit_at_5": round(sum(
+                rank is not None and rank <= 5 for rank in accepted)
+                / max(1, len(accepted)), 4),
+            "accepted_target_top_1": sum(rank == 1 for rank in accepted),
+        }
 
     return {
         "queries": len(records),
@@ -397,6 +415,7 @@ def _e5_source_probe(records: list[dict], dsn: str, token: str) -> dict:
             / max(1, len(accepted_ranks)), 4) if accepted_ranks else None,
         "accepted_target_top_1": sum(rank == 1 for rank in accepted_ranks),
         "accepted_target_not_top_1": sum(rank != 1 for rank in accepted_ranks),
+        "confidence_threshold_sweep": gate_sweep,
         "encoder_http_ms_per_query_p50": round(statistics.median(batch_ms), 2)
         if batch_ms else None,
     }
