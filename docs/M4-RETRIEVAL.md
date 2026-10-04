@@ -91,15 +91,16 @@ The privacy-safe `scripts/live_memory_quality_eval.py` sampled 120 explicit
 current DECISION/CONSTRAINT/TASK memories and formed queries from their exact
 `item_key`, title, or content topic (proxy, not human-judged). Exact matches used
 the indexed FTS/key path: 120/120 top-1, zero project leaks, zero vector errors;
-search-server p50/p95 0.36/0.89 ms and HTTP p50/p95 1.38/1.92 ms. Compared with
-the earlier unique-query server p50 of 67.8 ms, the retrieval-server path is
-about 188x faster for these exact-topic hits; HTTP end-to-end is about 50x due
-to fixed API overhead.
+search-server p50/p95 0.59/1.14 ms and HTTP p50/p95 1.73/2.47 ms. A separate
+24-query uncached semantic-fallback probe measured server p50/p95 48.5/62.0 ms
+and HTTP p50/p95 50.3/64.0 ms, with no vector failures. Thus exact matches are
+about 82x faster at the server median (and 29x end-to-end) in this run; this is
+not 100x, and does not generalize to arbitrary semantic questions. The generated
+query evaluation is a proxy, not human-judged.
 
-For 24 unique no-hit semantic probes, the vector fallback remained healthy
-(24/24): server p50/p95 54.9/93.3 ms, HTTP 56.6/105.6 ms. This is not a 100x
-improvement for arbitrary semantic questions; unmatched/ambiguous queries still
-use ONNX by design. Measurements are local observations, not an SLA.
+Unmatched/ambiguous queries still use ONNX by design. A topic-only API check
+skipped vectors for 109/120 samples and preserved top-1 quality; 11 samples fell
+back to semantic search. Measurements are local observations, not an SLA.
 
 ## Context Capsule integration
 
