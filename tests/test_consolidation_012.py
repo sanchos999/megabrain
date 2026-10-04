@@ -12,6 +12,7 @@ from consolidation.worker import (
     importance_signal,
     prefilter,
 )
+from operations import WorkerHeartbeat
 from storage.pg import should_enqueue_consolidation
 
 
@@ -231,6 +232,20 @@ def test_technical_echo_never_enters_consolidation_queue():
         "USER_MESSAGE", {"text": "A sufficiently long real user message"},
         {"technical_echo": False},
     )
+
+
+def test_worker_heartbeat_logs_error_class_without_message(monkeypatch, caplog):
+    import operations
+
+    def fail_connect(*_args, **_kwargs):
+        raise RuntimeError("sensitive provider response")
+
+    monkeypatch.setattr(operations.psycopg, "connect", fail_connect)
+    heartbeat = WorkerHeartbeat("test-component", dsn="unused")
+
+    assert not heartbeat.update(error=RuntimeError("sensitive provider response"))
+    assert "component=test-component error_class=RuntimeError" in caplog.text
+    assert "sensitive provider response" not in caplog.text
 
 
 def test_scheduler_fetches_bounded_raw_events_before_python_prefilter():
