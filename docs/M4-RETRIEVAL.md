@@ -64,11 +64,11 @@ Supersession: memory_items.supersedes_id + valid_to; item_key
 | Embedding worker down | existing vectors работают, новые events через FTS |
 | Redis down | PG fallback, mode=DEGRADED (M1) |
 
-Queries containing exactly one explicit identifier (`item_key`) first try an
-indexed lookup of high-confidence current explicit memory. If it matches, the
-vector model is skipped and the canonical item's source-event provenance is
-returned. Ambiguous, historical, deep, or unmatched queries retain the full
-hybrid FTS + vector path.
+Queries containing one explicit identifier (`item_key`) first try an indexed
+lookup of high-confidence current explicit memory. For `topic: phrase` queries,
+the FTS path can also skip vectors only when the full phrase literally matches
+the returned high-confidence current memory text. Ambiguous, historical, deep,
+or unmatched queries retain the full hybrid FTS + vector path.
 
 ## Performance (production, 2026-10-01, after v4 backfill)
 

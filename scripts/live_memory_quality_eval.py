@@ -137,7 +137,7 @@ def _evaluate_api(records: list[dict], token: str) -> dict:
     fast_server: list[float] = []
     full_server: list[float] = []
     ranks: list[int] = []
-    skipped = degraded = project_leaks = 0
+    skipped_key = skipped_topic = degraded = project_leaks = 0
     for index, record in enumerate(records, 1):
         # Trailing whitespace is tokenizer-equivalent but defeats the exact
         # query-vector cache, so semantic fallback timings remain cache-cold.
@@ -159,10 +159,11 @@ def _evaluate_api(records: list[dict], token: str) -> dict:
         times.append((time.perf_counter() - started) * 1000)
         server_time = float(result.get("latency_ms", 0))
         server_times.append(server_time)
-        if result.get("vector_skipped") == "exact_item_key":
+        if result.get("vector_skipped"):
             fast_http.append(times[-1])
             fast_server.append(server_time)
-            skipped += 1
+            skipped_key += int(result["vector_skipped"] == "exact_item_key")
+            skipped_topic += int(result["vector_skipped"] == "exact_item_topic")
         else:
             full_http.append(times[-1])
             full_server.append(server_time)
@@ -183,7 +184,8 @@ def _evaluate_api(records: list[dict], token: str) -> dict:
     return {
         "hit_at_5": round(sum(rank <= 5 for rank in ranks) / len(records), 4),
         "top_1": sum(rank == 1 for rank in ranks),
-        "vector_skipped_exact_key": skipped,
+        "vector_skipped_exact_key": skipped_key,
+        "vector_skipped_exact_topic": skipped_topic,
         "vector_degraded_queries": degraded,
         "project_leaks": project_leaks,
         "http_p50_ms": round(statistics.median(sorted_times), 2),

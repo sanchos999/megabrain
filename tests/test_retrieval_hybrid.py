@@ -112,6 +112,52 @@ def test_exact_current_item_key_skips_onnx_but_keeps_provenance():
     assert result["results"][0]["source_event_ids"] == ["event-1"]
 
 
+def test_delimited_topic_requires_literal_high_confidence_fts_match():
+    row = (
+        "item:item-2", "event-2", "item-2", None, "project-1", "MEMORY_ITEM",
+        "DECISION", datetime.now(UTC), "memory consolidation policy",
+        ["event-2"], 0.99, datetime.now(UTC), None, False,
+    )
+
+    class Cursor:
+        def __init__(self):
+            self.calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+
+        def fetchall(self):
+            return [] if len(self.calls) == 1 else [row]
+
+    class Connection:
+        def __init__(self):
+            self.cursor_value = Cursor()
+
+        def cursor(self):
+            return self.cursor_value
+
+    retriever = HybridRetriever({"retrieval_query_cache_max": 0})
+    conn = Connection()
+    retriever._connection = lambda: conn
+    retriever._encode_query = lambda _query: (_ for _ in ()).throw(AssertionError("ONNX should be skipped"))
+
+    result = retriever.search(
+        "Что решили по теме: memory consolidation policy?", mode="WARM",
+        limit=5, project_id="project-1",
+    )
+
+    assert len(conn.cursor_value.calls) == 2
+    assert conn.cursor_value.calls[1][1]["q"] == "memory consolidation policy"
+    assert result["vector_skipped"] == "exact_item_topic"
+    assert result["results"][0]["memory_item_id"] == "item-2"
+
+
 def test_unmatched_explicit_key_falls_back_to_semantic_hybrid_search():
     class EmptyCursor:
         def __init__(self):
@@ -146,7 +192,7 @@ def test_unmatched_explicit_key_falls_back_to_semantic_hybrid_search():
 
     calls = conn.cursor_value.calls
     assert calls[0][1]["item_key"] == "missing_key_998"
-    assert calls[1][1]["q"] == query
+    assert calls[2][1]["q"] == query
     assert result["vector_leg"] is True
     assert result["vector_skipped"] is None
     assert result["vector_degraded"] is False

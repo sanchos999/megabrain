@@ -314,13 +314,19 @@ class HybridRetriever:
         return event_fts_rows, item_fts_rows, event_vec_rows, item_vec_rows, vec_ok
 
     @staticmethod
-    def _exact_item_key(query: str) -> str | None:
-        """Return one explicit identifier or a delimited item-key phrase."""
+    def _delimited_topic(query: str) -> str | None:
         suffix = re.search(r":\s+([^:\n?;]{4,120})[?!.]*\s*$", query or "")
         if suffix:
             candidate = " ".join(suffix.group(1).strip(" `\"'()[]{}").split())
             if candidate:
                 return candidate
+
+    @staticmethod
+    def _exact_item_key(query: str) -> str | None:
+        """Return one explicit identifier or a delimited item-key phrase."""
+        topic = HybridRetriever._delimited_topic(query)
+        if topic:
+            return topic
         tokens = re.findall(r"[A-Za-zА-Яа-я][A-Za-zА-Яа-я0-9_.:/-]*", query or "")
         keys = {token.strip(".:/-") for token in tokens
                 if len(token.strip(".:/-")) >= 4
@@ -363,6 +369,7 @@ class HybridRetriever:
         top_n = limit * 3 if not deep else max(limit * 5, 50)
         conn = self._connection()
         vector_skipped = False
+        vector_skip_reason = None
         try:
             with conn.cursor() as cur:
                 key = self._exact_item_key(query)
@@ -378,10 +385,29 @@ class HybridRetriever:
                         {"item_key": key, "lim": max(limit * 3, 20), **item_params},
                     )
                     exact_rows = self._fetch(cur)
+                    if not exact_rows and self._delimited_topic(query):
+                        cur.execute(
+                            self.ITEM_FTS_SQL + item_extra
+                            + " and mi.confidence >= 0.9 and mi.extractor_type = 'EXPLICIT'"
+                              " and coalesce(mi.content->>'status', '') not in ('REJECTED', 'SUPERSEDED')"
+                              " and coalesce(mi.content->>'content_status', '') <> 'REJECTED_EMPTY'"
+                            + " order by mi.confidence desc, mi.valid_from desc limit %(lim)s",
+                            {"q": key, "lim": max(limit * 3, 20), **item_params},
+                        )
+                        topic_rows = self._fetch(cur)
+                        normalized_key = " ".join(key.casefold().split())
+                        exact_rows = [
+                            row for row in topic_rows
+                            if normalized_key in " ".join((row[8] or "").casefold().split())
+                        ]
+                        if exact_rows:
+                            vector_skipped = True
+                            vector_skip_reason = "exact_item_topic"
                 if exact_rows:
                     event_fts, item_fts = [], exact_rows
                     event_vec, item_vec, vec_ok = [], [], False
                     vector_skipped = True
+                    vector_skip_reason = vector_skip_reason or "exact_item_key"
                     rrf = self._rrf(item_fts, [], max(limit * 3, 20))
                 else:
                     event_fts, item_fts, event_vec, item_vec, vec_ok = self._run_legs(
@@ -442,7 +468,7 @@ class HybridRetriever:
             "vector_leg": vec_ok,
             "vector_degraded": not vec_ok and not vector_skipped,
             "vector_error": None if vector_skipped else getattr(self._local, "vector_error", None),
-            "vector_skipped": "exact_item_key" if vector_skipped else None,
+            "vector_skipped": vector_skip_reason,
             "count": len(results),
             "results": results,
             "latency_ms": round((time.perf_counter() - t0) * 1000, 2),
