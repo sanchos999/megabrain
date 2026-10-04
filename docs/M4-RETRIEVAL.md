@@ -103,6 +103,15 @@ Unmatched/ambiguous queries still use ONNX by design. A topic-only API check
 skipped vectors for 109/120 samples and preserved top-1 quality; 11 samples fell
 back to semantic search. Measurements are local observations, not an SLA.
 
+After adding an allowlisted RU/EN question-shell parser, a post-deploy check of
+120 generated natural-question proxies (40 per DECISION/CONSTRAINT/TASK) routed
+116 through exact key/topic FTS and four through semantic fallback. The target
+was in top-5 for 120/120, with zero project leaks or degraded vectors. Server
+p50/p95 was 0.53/5.34 ms and HTTP p50/p95 1.60/6.47 ms. This is still a
+memory-derived proxy, not a representative human-judged query set. The parser
+has no fast-route candidate for the older 18-query Hermes trace sample; the new
+Hermes tool hint was activated after those calls were recorded.
+
 ### Hermes trace replay (limited sample, 2026-10-04)
 
 A privacy-preserving replay of 18 archived, valid Hermes `memory_search` calls
