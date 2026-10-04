@@ -201,7 +201,11 @@ class HybridRetriever:
 
     def _encode_query(self, query: str) -> list[float] | None:
         self._local.vector_error = None
-        cache_key = query[:MAX_DOC_CHARS]
+        # The tokenizer treats runs of whitespace as separators. Canonicalize
+        # before both caching and inference so transport formatting (newlines,
+        # tabs, repeated spaces) does not trigger an identical ONNX pass.
+        normalized_query = " ".join(str(query).split())
+        cache_key = normalized_query[:MAX_DOC_CHARS]
         now = time.monotonic()
         with self._query_cache_lock:
             cached = self._query_cache.get(cache_key)
@@ -216,7 +220,7 @@ class HybridRetriever:
                 from benchmark.onnx_embed import OnnxBgeM3
                 self._embedder = OnnxBgeM3(
                     threads=int(self.cfg.get("onnx_threads", 2)))
-            v = self._embedder.encode([query[:MAX_DOC_CHARS]], max_length=MAX_LEN)
+            v = self._embedder.encode([normalized_query[:MAX_DOC_CHARS]], max_length=MAX_LEN)
             if v is None or len(v) == 0:
                 self._local.vector_error = "empty_embedding"
                 return None

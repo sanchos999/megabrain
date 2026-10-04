@@ -51,16 +51,20 @@ def _sample(dsn: str, per_kind: int) -> list[dict]:
             raise RuntimeError("Database connection is not read-only.")
         for kind in QUESTIONS:
             rows = conn.execute(
-                """SELECT item_id, project_id, kind, content, source_event_ids, confidence
-                     FROM memory_items
-                    WHERE kind=%s AND extractor_type='EXPLICIT' AND valid_to IS NULL
-                      AND confidence >= 0.9
-                      AND COALESCE(content->>'status','') NOT IN ('REJECTED','SUPERSEDED')
-                    ORDER BY md5(item_id || 'live-retrieval-eval-v1')
+                """SELECT mi.item_id, mi.project_id, mi.kind, mi.content,
+                          mi.source_event_ids, mi.confidence, src.payload->>'text'
+                     FROM memory_items mi
+                     LEFT JOIN events src
+                       ON src.event_id = mi.source_event_ids[1]
+                      AND src.project_id = mi.project_id
+                    WHERE mi.kind=%s AND mi.extractor_type='EXPLICIT' AND mi.valid_to IS NULL
+                      AND mi.confidence >= 0.9
+                      AND COALESCE(mi.content->>'status','') NOT IN ('REJECTED','SUPERSEDED')
+                    ORDER BY md5(mi.item_id || 'live-retrieval-eval-v2')
                     LIMIT %s""",
                 (kind, per_kind),
             ).fetchall()
-            for item_id, project_id, item_kind, content, source_ids, confidence in rows:
+            for item_id, project_id, item_kind, content, source_ids, confidence, source_text in rows:
                 content = content if isinstance(content, dict) else json.loads(content or "{}")
                 topic = str(content.get("item_key") or "").strip()
                 if len(topic) < 3:
@@ -79,6 +83,10 @@ def _sample(dsn: str, per_kind: int) -> list[dict]:
                     "confidence": float(confidence),
                     "fts_query": topic[:220],
                     "question": question,
+                    # The original user wording is a more realistic query than
+                    # a question synthesized from the memory's own item key.
+                    # It remains in memory only and is never printed or stored.
+                    "source_query": str(source_text or "").strip()[:1000],
                 })
     return selected
 
@@ -129,7 +137,8 @@ def _evaluate(retriever: HybridRetriever, records: list[dict], *, fts_key_only: 
     }
 
 
-def _evaluate_api(records: list[dict], token: str, *, topic_only: bool = False) -> dict:
+def _evaluate_api(records: list[dict], token: str, *, query_field: str = "question",
+                  require_item_match: bool = False) -> dict:
     times: list[float] = []
     server_times: list[float] = []
     fast_http: list[float] = []
@@ -138,10 +147,11 @@ def _evaluate_api(records: list[dict], token: str, *, topic_only: bool = False) 
     full_server: list[float] = []
     ranks: list[int] = []
     skipped_key = skipped_topic = degraded = project_leaks = 0
+    retrieval_paths: dict[str, int] = {}
     for index, record in enumerate(records, 1):
         # Trailing whitespace is tokenizer-equivalent but defeats the exact
         # query-vector cache, so semantic fallback timings remain cache-cold.
-        base_query = record["fts_query"] if topic_only else record["question"]
+        base_query = record[query_field]
         query = base_query + " " * index
         payload = json.dumps({
             "query": query, "mode": "WARM", "limit": 50,
@@ -160,6 +170,8 @@ def _evaluate_api(records: list[dict], token: str, *, topic_only: bool = False) 
         times.append((time.perf_counter() - started) * 1000)
         server_time = float(result.get("latency_ms", 0))
         server_times.append(server_time)
+        path = str(result.get("retrieval_path", "unknown"))
+        retrieval_paths[path] = retrieval_paths.get(path, 0) + 1
         if result.get("vector_skipped"):
             fast_http.append(times[-1])
             fast_server.append(server_time)
@@ -172,6 +184,11 @@ def _evaluate_api(records: list[dict], token: str, *, topic_only: bool = False) 
         project_leaks += sum(1 for hit in result.get("results", [])
                              if hit.get("project_id") != record["project_id"])
         for rank, hit in enumerate(result.get("results", []), 1):
+            if require_item_match:
+                if hit.get("memory_item_id") == record["item_id"]:
+                    ranks.append(rank)
+                    break
+                continue
             source_match = bool(record["source_ids"] & set(hit.get("source_event_ids") or []))
             if hit.get("memory_item_id") == record["item_id"] or source_match:
                 ranks.append(rank)
@@ -187,6 +204,8 @@ def _evaluate_api(records: list[dict], token: str, *, topic_only: bool = False) 
         "top_1": sum(rank == 1 for rank in ranks),
         "vector_skipped_exact_key": skipped_key,
         "vector_skipped_exact_topic": skipped_topic,
+        "semantic_fallback_queries": len(records) - skipped_key - skipped_topic,
+        "retrieval_paths": retrieval_paths,
         "vector_degraded_queries": degraded,
         "project_leaks": project_leaks,
         "http_p50_ms": round(statistics.median(sorted_times), 2),
@@ -197,6 +216,41 @@ def _evaluate_api(records: list[dict], token: str, *, topic_only: bool = False) 
         "semantic_fallback_http_p50_ms": p50(full_http),
         "fast_path_server_p50_ms": p50(fast_server),
         "semantic_fallback_server_p50_ms": p50(full_server),
+    }
+
+
+def _whitespace_cache_probe(records: list[dict], token: str) -> dict:
+    cold, equivalent = [], []
+    for index, record in enumerate(records[:20], 1):
+        query = record["source_query"]
+        times = []
+        for formatted in (f"{query}\n", f" \t{query}  \n"):
+            payload = json.dumps({
+                "query": formatted, "mode": "WARM", "limit": 10,
+                "project_id": record["project_id"],
+            }).encode()
+            headers = {"Content-Type": "application/json"}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            request = urllib.request.Request(
+                "http://127.0.0.1:4300/v1/memory/search", data=payload,
+                headers=headers, method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                result = json.loads(response.read())
+            if not result.get("vector_skipped"):
+                times.append(float(result.get("latency_ms", 0)))
+        if len(times) == 2:
+            cold.append(times[0])
+            equivalent.append(times[1])
+
+    def p50(values: list[float]) -> float | None:
+        return round(statistics.median(values), 2) if values else None
+
+    return {
+        "paired_semantic_queries": len(cold),
+        "first_format_server_p50_ms": p50(cold),
+        "equivalent_whitespace_format_server_p50_ms": p50(equivalent),
     }
 
 
@@ -225,7 +279,11 @@ def run() -> int:
     finally:
         retriever._drop_connection()
     api_metrics = _evaluate_api(records, token)
-    topic_api_metrics = _evaluate_api(records, token, topic_only=True)
+    topic_api_metrics = _evaluate_api(records, token, query_field="fts_query")
+    source_records = [record for record in records if len(record["source_query"]) >= 20]
+    source_query_metrics = _evaluate_api(
+        source_records, token, query_field="source_query", require_item_match=True)
+    whitespace_cache_metrics = _whitespace_cache_probe(source_records, token)
     result = {
         "evaluation": "generated questions from explicit current memories; proxy, not human-judged",
         "queries": len(records),
@@ -234,6 +292,12 @@ def run() -> int:
         "metrics": metrics,
         "production_api_metrics": api_metrics,
         "production_api_topic_metrics": topic_api_metrics,
+        "source_message_canonical_item_metrics": {
+            "evaluation": "original user wording; canonical memory item required; lexical overlap is not controlled",
+            "queries": len(source_records),
+            **source_query_metrics,
+        },
+        "whitespace_equivalent_cache_probe": whitespace_cache_metrics,
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     unsafe = metrics["project_leaks"] or metrics["vector_degraded_queries"]

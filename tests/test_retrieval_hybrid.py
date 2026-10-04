@@ -58,6 +58,29 @@ def test_embedding_worker_accepts_ndarray_and_json_vector_rows():
     assert _vector_values([0.25, 0.5]) == [0.25, 0.5]
 
 
+def test_query_embedding_cache_normalizes_whitespace_before_inference():
+    class FakeVector:
+        def tolist(self):
+            return [0.25] * 1024
+
+    class FakeEmbedder:
+        def __init__(self):
+            self.calls = []
+
+        def encode(self, texts, max_length):
+            self.calls.append((texts, max_length))
+            return [FakeVector()]
+
+    retriever = HybridRetriever({"retrieval_query_cache_max": 4})
+    retriever._embedder = FakeEmbedder()
+
+    first = retriever._encode_query("Find the decision\nabout memory")
+    second = retriever._encode_query("  Find the decision   about memory\t")
+
+    assert first == second == [0.25] * 1024
+    assert retriever._embedder.calls == [(["Find the decision about memory"], 512)]
+
+
 def test_exact_item_key_detection_requires_one_explicit_identifier():
     assert HybridRetriever._exact_item_key("Какие ограничения для vector_backend?") == "vector_backend"
     assert HybridRetriever._exact_item_key("Какие ограничения для темы: память консолидации?") == "память консолидации"
