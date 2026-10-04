@@ -1,0 +1,163 @@
+"""Read-only retrieval evaluation against explicit current memories.
+
+Questions are generated in-process from confirmed memory keys. No memory text,
+queries, IDs, or project names are printed or persisted. PostgreSQL sessions are
+forced read-only; embeddings use the loopback API's already-loaded model.
+
+Required: MEGABRAIN_READONLY_DATABASE_URL (must select the `megabrain` DB).
+Optional: MEGABRAIN_API_TOKEN_FILE, MEGABRAIN_EMBEDDING_URL, MEGABRAIN_EVAL_PER_KIND.
+"""
+from __future__ import annotations
+
+import json
+import os
+import statistics
+import sys
+from pathlib import Path
+
+import psycopg
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from retrieval.hybrid import HybridRetriever
+from scripts.retrieval_quality_eval import _embed_many, _loopback_embed_url
+
+QUESTIONS = {
+    "DECISION": "Какое решение приняли по теме: {topic}?",
+    "CONSTRAINT": "Какие ограничения нужно соблюдать для: {topic}?",
+    "TASK": "Что нужно сделать по задаче: {topic}?",
+}
+
+
+def _read_only_dsn() -> str:
+    dsn = os.environ.get("MEGABRAIN_READONLY_DATABASE_URL", "").strip()
+    if not dsn:
+        raise SystemExit("Set MEGABRAIN_READONLY_DATABASE_URL explicitly.")
+    params = conninfo_to_dict(dsn)
+    if params.get("dbname") != "megabrain":
+        raise SystemExit("Refusing to run: this evaluator is restricted to the megabrain database.")
+    params["options"] = "-c default_transaction_read_only=on"
+    return make_conninfo(**params)
+
+
+def _sample(dsn: str, per_kind: int) -> list[dict]:
+    selected: list[dict] = []
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        if conn.execute("SHOW transaction_read_only").fetchone()[0] != "on":
+            raise RuntimeError("Database connection is not read-only.")
+        for kind in QUESTIONS:
+            rows = conn.execute(
+                """SELECT item_id, project_id, kind, content, source_event_ids, confidence
+                     FROM memory_items
+                    WHERE kind=%s AND extractor_type='EXPLICIT' AND valid_to IS NULL
+                      AND confidence >= 0.9
+                      AND COALESCE(content->>'status','') NOT IN ('REJECTED','SUPERSEDED')
+                    ORDER BY md5(item_id || 'live-retrieval-eval-v1')
+                    LIMIT %s""",
+                (kind, per_kind),
+            ).fetchall()
+            for item_id, project_id, item_kind, content, source_ids, confidence in rows:
+                content = content if isinstance(content, dict) else json.loads(content or "{}")
+                topic = str(content.get("item_key") or "").strip()
+                if len(topic) < 3:
+                    topic = str(content.get("title") or "").strip()
+                if len(topic) < 3:
+                    text = str(content.get("text") or content.get("content") or "").strip()
+                    topic = " ".join(text.split()[:8])
+                if len(topic) < 3:
+                    continue
+                question = QUESTIONS[item_kind].format(topic=topic[:220])
+                selected.append({
+                    "item_id": item_id,
+                    "project_id": project_id,
+                    "kind": item_kind,
+                    "source_ids": set(source_ids or []),
+                    "confidence": float(confidence),
+                    "question": question,
+                })
+    return selected
+
+
+def _evaluate(retriever: HybridRetriever, records: list[dict]) -> dict:
+    ranks: dict[str, list[int]] = {kind: [] for kind in QUESTIONS}
+    latencies: list[float] = []
+    project_leaks = vector_degraded = 0
+    for record in records:
+        result = retriever.search(record["question"], mode="WARM", limit=50,
+                                  project_id=record["project_id"])
+        latencies.append(float(result["latency_ms"]))
+        vector_degraded += int(result.get("vector_degraded", True))
+        project_leaks += sum(1 for hit in result.get("results", [])
+                             if hit.get("project_id") != record["project_id"])
+        for rank, hit in enumerate(result.get("results", []), 1):
+            source_match = bool(record["source_ids"] & set(hit.get("source_event_ids") or []))
+            if hit.get("memory_item_id") == record["item_id"] or source_match:
+                ranks[record["kind"]].append(rank)
+                break
+
+    rank_values = [rank for kind_ranks in ranks.values() for rank in kind_ranks]
+    queries = len(records)
+    sorted_latency = sorted(latencies)
+    return {
+        "hit_at_5": round(sum(rank <= 5 for rank in rank_values) / queries, 4),
+        "hit_at_10": round(sum(rank <= 10 for rank in rank_values) / queries, 4),
+        "hit_at_20": round(sum(rank <= 20 for rank in rank_values) / queries, 4),
+        "hit_at_50": round(sum(rank <= 50 for rank in rank_values) / queries, 4),
+        "mrr_at_10": round(sum(1 / rank for rank in rank_values) / queries, 4),
+        "top_1": sum(rank == 1 for rank in rank_values),
+        "project_leaks": project_leaks,
+        "vector_degraded_queries": vector_degraded,
+        "search_latency_ms_p50": round(statistics.median(sorted_latency), 2),
+        "search_latency_ms_p95": round(sorted_latency[min(queries - 1, int(queries * 0.95))], 2),
+        "by_kind": {
+            kind: {
+                "queries": sum(row["kind"] == kind for row in records),
+                "hit_at_5": round(sum(rank <= 5 for rank in ranks[kind]) /
+                                   max(1, sum(row["kind"] == kind for row in records)), 4),
+                "mrr_at_10": round(sum(1 / rank for rank in ranks[kind]) /
+                                    max(1, sum(row["kind"] == kind for row in records)), 4),
+                "top_1": sum(rank == 1 for rank in ranks[kind]),
+            }
+            for kind in QUESTIONS
+        },
+    }
+
+
+def run() -> int:
+    dsn = _read_only_dsn()
+    per_kind = min(200, max(10, int(os.environ.get("MEGABRAIN_EVAL_PER_KIND", "40"))))
+    records = _sample(dsn, per_kind)
+    if len(records) < 30:
+        raise RuntimeError(f"Only {len(records)} eligible explicit memories; need at least 30.")
+
+    embed_url = _loopback_embed_url()
+    token_path = Path(os.environ.get(
+        "MEGABRAIN_API_TOKEN_FILE", str(Path.home() / ".config/megabrain/token")))
+    token = token_path.read_text().strip() if token_path.is_file() else ""
+    questions = [record["question"] for record in records]
+    _, vectors = _embed_many(questions, embed_url, token)
+    vector_by_question = dict(zip(questions, vectors, strict=True))
+    retriever = HybridRetriever({"postgres_dsn": dsn, "retrieval_query_cache_max": 0})
+    retriever._encode_query = lambda question: vector_by_question[question]
+    try:
+        metrics = _evaluate(retriever, records)
+    finally:
+        retriever._drop_connection()
+    result = {
+        "evaluation": "generated questions from explicit current memories; proxy, not human-judged",
+        "queries": len(records),
+        "metrics": metrics,
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    unsafe = metrics["project_leaks"] or metrics["vector_degraded_queries"]
+    return int(bool(unsafe))
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(run())
+    except Exception as exc:
+        print(f"live memory eval failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        raise SystemExit(2)

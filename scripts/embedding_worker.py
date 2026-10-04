@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from benchmark.onnx_embed import EMBEDDING_MODEL_VERSION
 from core.config import load_config
+from core.memory_item_text import MEMORY_ITEM_TEXT_SQL
 from operations import WorkerHeartbeat
 
 STATE = Path(os.environ.get("MB_STATE_DIR") or (ROOT / "state"))
@@ -54,24 +55,9 @@ def fetch_batch(cur, limit):
 
 def fetch_item_batch(cur, limit):
     """Canonical memory is indexed before noisy raw events."""
-    cur.execute("""with item_text as (
+    cur.execute(f"""with item_text as (
         select mi.item_id,
-               left(concat_ws(' ', mi.kind,
-                    nullif(mi.content->>'title', ''),
-                    nullif(mi.content->>'summary', ''),
-                    nullif(mi.content->>'text', ''),
-                    nullif(mi.content->>'content', ''),
-                    nullif(mi.content->>'situation', ''),
-                    nullif(mi.content->>'lesson', ''),
-                    nullif(mi.content->>'rationale', ''),
-                    nullif(mi.content->>'reason', ''),
-                    nullif(mi.content->>'cause', ''),
-                    nullif(mi.content->>'effect', ''),
-                    nullif(mi.content->>'outcome', ''),
-                    nullif(mi.content->>'result', ''),
-                    nullif(mi.content->>'recommendation', ''),
-                    nullif(mi.content->>'action', ''),
-                    nullif(mi.content->>'description', '')), %(cap)s) as text
+               left({MEMORY_ITEM_TEXT_SQL}, %(cap)s) as text
         from memory_items mi
         where length(trim(mi.content::text)) > 0
           and coalesce(mi.content->>'content_status', '') <> 'REJECTED_EMPTY'
@@ -149,6 +135,10 @@ def encode_via_api(texts, cfg):
     # the same ndarray type the in-process encoder returned.
     return np.asarray(vectors, dtype=np.float32)
 
+def _vector_values(vector):
+    """Normalize API arrays and JSON-style lists before writing pgvector."""
+    return np.asarray(vector, dtype=np.float32).tolist()
+
 
 def main():
     signal.signal(signal.SIGTERM,_handle_term); signal.signal(signal.SIGINT,_handle_term)
@@ -196,10 +186,10 @@ def main():
                     if start + API_EMBED_CHUNK < len(batch):
                         time.sleep(0.01)
                 if item_batch:
-                    rows=[(b["item_id"],b["content_hash"],MODEL,MODEL_VERSION,DIM,v.tolist()) for b,v in zip(batch,vecs)]
+                    rows=[(b["item_id"],b["content_hash"],MODEL,MODEL_VERSION,DIM,_vector_values(v)) for b,v in zip(batch,vecs)]
                     cur.executemany("""insert into memory_item_embeddings(item_id,content_hash,model,model_version,dimension,embedding) values (%s,%s,%s,%s,%s,%s) on conflict(item_id,model_version) do update set content_hash=excluded.content_hash,embedding=excluded.embedding,indexed_at=now() where memory_item_embeddings.content_hash!=excluded.content_hash""",rows)
                 else:
-                    rows=[(b["event_id"],b.get("project_id"),b["content_hash"],MODEL,MODEL_VERSION,DIM,v.tolist()) for b,v in zip(batch,vecs)]
+                    rows=[(b["event_id"],b.get("project_id"),b["content_hash"],MODEL,MODEL_VERSION,DIM,_vector_values(v)) for b,v in zip(batch,vecs)]
                     cur.executemany("""insert into memory_embeddings(event_id,project_id,content_hash,model,model_version,dimension,embedding) values (%s,%s,%s,%s,%s,%s,%s) on conflict(event_id,model_version) do update set project_id=excluded.project_id,content_hash=excluded.content_hash,embedding=excluded.embedding,indexed_at=now() where memory_embeddings.content_hash!=excluded.content_hash""",rows)
                 progress.data["embedded"]+=len(batch); progress.data["batches"]+=1; progress.data["last_event_id"]=batch[-1].get("event_id") or batch[-1].get("item_id"); progress.data["last_batch_at"]=time.time(); progress.save(); heartbeat.update(state="RUNNING",success=True,processed_items=len(batch))
             time.sleep(SLEEP_BETWEEN_BATCHES_S)

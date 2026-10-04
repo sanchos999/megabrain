@@ -16,6 +16,7 @@ import psycopg
 
 from benchmark.onnx_embed import EMBEDDING_MODEL_VERSION
 from core.config import load_config
+from core.memory_item_text import MEMORY_ITEM_TEXT_SQL
 
 RRF_K = 60
 EMBEDDING_MODEL = "bge-m3-int8-onnx"
@@ -94,22 +95,7 @@ class HybridRetriever:
           and me.embedding <=> %(vec)s::vector < 0.98
     """
 
-    ITEM_TEXT = """concat_ws(' ', mi.kind,
-        nullif(mi.content->>'title', ''),
-        nullif(mi.content->>'summary', ''),
-        nullif(mi.content->>'text', ''),
-        nullif(mi.content->>'content', ''),
-        nullif(mi.content->>'situation', ''),
-        nullif(mi.content->>'lesson', ''),
-        nullif(mi.content->>'rationale', ''),
-        nullif(mi.content->>'reason', ''),
-        nullif(mi.content->>'cause', ''),
-        nullif(mi.content->>'effect', ''),
-        nullif(mi.content->>'outcome', ''),
-        nullif(mi.content->>'result', ''),
-        nullif(mi.content->>'recommendation', ''),
-        nullif(mi.content->>'action', ''),
-        nullif(mi.content->>'description', ''))"""
+    ITEM_TEXT = MEMORY_ITEM_TEXT_SQL
 
     ITEM_FTS_SQL = f"""
         select 'item:' || mi.item_id as key,
