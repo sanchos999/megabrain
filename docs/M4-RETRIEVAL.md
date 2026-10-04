@@ -102,6 +102,16 @@ Unmatched/ambiguous queries still use ONNX by design. A topic-only API check
 skipped vectors for 109/120 samples and preserved top-1 quality; 11 samples fell
 back to semantic search. Measurements are local observations, not an SLA.
 
+### Hermes trace replay (limited sample, 2026-10-04)
+
+A privacy-preserving replay of 18 archived, valid Hermes `memory_search` calls
+from 2026-09-12 through 2026-10-01 ran against the current API. Seventeen used
+semantic retrieval and one used the exact-topic path; no vector failures
+occurred. Server latency was p50/p95 37.8/115.3 ms and HTTP latency was
+39.7/117.1 ms. The sample is small and old, and has no relevance labels, so this
+measures routing and latency only—not answer quality. Query text was neither
+printed nor persisted by the replay.
+
 ## Context Capsule integration
 
 Capsule не заменяется vector-результатами. Structured current state имеет
