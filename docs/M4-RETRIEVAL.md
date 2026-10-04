@@ -254,6 +254,26 @@ hit top-5 for all 11 (0.85/0.05 accepted 6/45, all hits). Because the thresholds
 were swept on this same small sample, this is exploratory only; no production
 E5 threshold or route was changed.
 
+### Expanded live retrieval canary (2026-10-05)
+
+The read-only live evaluator was expanded to 200 explicit current memories per
+kind (600 DECISION/CONSTRAINT/TASK targets). Generated target questions found
+the target top-1 in 600/600 direct DB-path searches and 600/600 loopback API
+searches; API server latency was p50/p95 0.49/1.02 ms, with zero project leaks
+or degraded vector searches. A separate 1,200-question RU/EN discussion-shell
+canary found every target top-1 (974 exact-topic, 134 exact-key, 92 hybrid-BGE
+routes); HTTP p50/p95 was 1.63/5.31 ms, again with no leaks or vector errors.
+These are generated, memory-derived proxies, not human relevance judgments.
+
+For original user messages linked to canonical memories, the larger sample had
+228 eligible pairs: the canonical target was top-5 for 225/228 (98.7%) and top-1
+for 224/228, with zero project leaks or vector degradation. Server p50/p95 was
+7.46/8.11 ms overall; four queries longer than 512 characters took 268.8 ms
+median and 567.2 ms p95. A paired model-union diagnostic raised top-5 coverage
+only from 224 to 225, so running a second encoder per query is not justified.
+These source pairs still have uncontrolled lexical overlap and are not a
+human-labeled measure of general recall.
+
 ## Context Capsule integration
 
 Capsule не заменяется vector-результатами. Structured current state имеет
