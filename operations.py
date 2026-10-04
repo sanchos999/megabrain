@@ -1,6 +1,7 @@
 """Durable worker heartbeats and operational status helpers."""
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import sqlite3
@@ -23,6 +24,7 @@ WAIT_REASONS = {
     "PRICE_GUARD", "BACKOFF", "PAUSED", "NO_MEANINGFUL_EVENTS",
 }
 ABS_MAX_WAIT_S = int(os.environ.get("MB_CONSOLIDATION_ABS_MAX_WAIT_S", "86400"))
+_logger = logging.getLogger(__name__)
 
 
 class WorkerHeartbeat:
@@ -33,6 +35,11 @@ class WorkerHeartbeat:
 
     def update(self, *, state="RUNNING", processed_items=0, success=False, error=None, detail=None,
                reset_errors=True) -> bool:
+        if error is not None:
+            # Keep diagnosis useful without putting exception messages, request
+            # content, or provider responses in persistent service journals.
+            _logger.warning("worker error reported: component=%s error_class=%s",
+                            self.component, type(error).__name__)
         try:
             with psycopg.connect(self.dsn) as conn, conn.cursor() as cur:
                 cur.execute("""INSERT INTO worker_status
