@@ -43,9 +43,14 @@ def main() -> int:
     print(f"consolidation worker started (model={worker.__class__.__module__})", flush=True)
     while not _stop:
         try:
-            worker.run_once()
+            result = worker.run_once()
+            if result.get("status") == "failed":
+                print(f"consolidation batch failed (error_class={result.get('error', 'unknown')})",
+                      flush=True)
         except Exception as e:  # noqa: BLE001
-            print(f"run_once error: {str(e)[:200]}", flush=True)
+            # Exception strings can contain provider details or source text;
+            # keep operational visibility without leaking those into journals.
+            print(f"run_once error (error_class={type(e).__name__})", flush=True)
         time.sleep(SLEEP_S)
     print("consolidation worker stopped", flush=True)
     return 0
