@@ -16,6 +16,11 @@ Hermes не теряет события при недоступности MegaBr
 - Backoff: `next_retry = now + min(2^attempts, 300)s` после неудачи.
 - Отправка в отдельном daemon-thread; MegaBrain down → drain останавливается,
   события остаются `failed`, replay после восстановления.
+- `TURN_STARTED` identity includes session, turn number, and message; resumed
+  sessions may reuse a turn number. The sender re-keys only the exact legacy
+  HTTP 400 payload-hash collision, preserves the old id in `correlation_id` and
+  `metadata.legacy_event_id`, then marks the original DLQ record resolved only
+  after the replacement event is accepted.
 
 ## Метрики (измерено)
 

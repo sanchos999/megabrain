@@ -122,10 +122,11 @@ class Outbox:
             self._conn.commit()
             return True
 
-    def resolve(self, event_id: str) -> bool:
+    def resolve(self, event_id: str, resolution: str = "resolved") -> bool:
         with self._lock:
             cur = self._conn.execute(
-                "UPDATE dead_letters SET state='RESOLVED' WHERE event_id=?", (event_id,))
+                "UPDATE dead_letters SET state='RESOLVED', resolution=? WHERE event_id=?",
+                (resolution, event_id))
             self._conn.commit()
             return cur.rowcount == 1
 

@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from integrations.hermes import events as E  # noqa: E402
+from integrations.hermes import mb_events as MB_EVENTS  # noqa: E402
 
 
 def test_turn_started_identity_includes_message():
@@ -27,6 +28,13 @@ def test_turn_started_identity_includes_message():
     assert first["event_id"] != later["event_id"]
     # Re-emitting the same turn must stay idempotent.
     assert E.turn_started("s1", 19, "Продолжай")["event_id"] == first["event_id"]
+
+
+def test_vendored_turn_started_identity_includes_message():
+    first = MB_EVENTS.turn_started("s1", 19, "Продолжай")
+    later = MB_EVENTS.turn_started("s1", 19, "Новый вопрос")
+    assert first["event_id"] != later["event_id"]
+    assert MB_EVENTS.turn_started("s1", 19, "Продолжай")["event_id"] == first["event_id"]
 
 
 def test_encode_via_api_returns_array_with_tolist(monkeypatch):

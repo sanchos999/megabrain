@@ -31,13 +31,44 @@ def _trace(hook: str, **fields) -> None:
         pass
 
 try:
+    from .mb_events import _event_id
     from .megabrain_client import MegaBrainClient, MegaBrainError, MegaBrainUnavailable
     from .outbox import Outbox
 except ImportError:  # vendored flat copy (Hermes plugin dir)
+    from mb_events import _event_id
     from megabrain_client import MegaBrainClient, MegaBrainError, MegaBrainUnavailable
     from outbox import Outbox
 
 logger = logging.getLogger("megabrain.sender")
+
+
+def _rekey_legacy_turn_started(event: dict, error: Exception) -> dict | None:
+    """Recover only the known legacy TURN_STARTED id-collision response."""
+    if (not isinstance(error, MegaBrainError)
+            or isinstance(error, MegaBrainUnavailable)
+            or error.status != 400
+            or "exists with different payload_hash" not in error.body
+            or event.get("source") != "hermes"
+            or event.get("event_type") != "TURN_STARTED"):
+        return None
+    payload = event.get("payload") or {}
+    session_id = event.get("session_id")
+    turn_number = payload.get("turn_number")
+    message = payload.get("message")
+    if not session_id or turn_number is None or not isinstance(message, str):
+        return None
+    old_id = event.get("event_id")
+    new_id = _event_id("TURN_STARTED", session_id, str(turn_number), message)
+    if not old_id or new_id == old_id:
+        return None
+    repaired = dict(event)
+    repaired["event_id"] = new_id
+    repaired["correlation_id"] = repaired.get("correlation_id") or old_id
+    repaired["metadata"] = {
+        **(repaired.get("metadata") or {}),
+        "legacy_event_id": old_id,
+    }
+    return repaired
 
 
 class Sender:
@@ -94,6 +125,22 @@ class Sender:
                     _trace("sender_delivered", session_id=event.get("session_id"), event_type=event.get("event_type"), outbox_action="delivered", status="ok")
                     delivered += 1
                 except (MegaBrainUnavailable, MegaBrainError) as e:
+                    repaired = _rekey_legacy_turn_started(event, e)
+                    if repaired is not None:
+                        try:
+                            self.client.write_event(repaired)
+                        except (MegaBrainUnavailable, MegaBrainError) as retry_error:
+                            e = retry_error
+                        else:
+                            self.outbox.mark_delivered(eid)
+                            self.outbox.resolve(
+                                eid, resolution=f"rekeyed:{repaired['event_id']}")
+                            _trace("sender_rekeyed", session_id=event.get("session_id"),
+                                   event_type=event.get("event_type"),
+                                   outbox_action="rekeyed", status="ok")
+                            logger.warning("re-keyed legacy TURN_STARTED collision")
+                            delivered += 1
+                            continue
                     if event.get("event_type") == "TURN_STARTED" and not event.get("project_id"):
                         self.outbox.dead_letter(eid, last_error=str(e), reason="PERMANENT_NON_RETRYABLE_HISTORICAL_MISSING_PROJECT")
                         logger.warning("dead-lettered historical identity-less event %s", eid)

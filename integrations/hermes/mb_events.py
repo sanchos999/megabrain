@@ -129,7 +129,9 @@ def error(session_id: str, message: str, *, project_id=None, turn_id=None,
 
 def turn_started(session_id: str, turn_number: int, message: str, *,
                  project_id=None, channel="cli") -> dict:
-    eid = _event_id("TURN_STARTED", session_id, str(turn_number))
+    # A resumed session can reuse a turn number; include its message in the ID
+    # so distinct turns cannot collide on the immutable event key.
+    eid = _event_id("TURN_STARTED", session_id, str(turn_number), message)
     return base("TURN_STARTED", session_id, channel=channel,
                 project_id=project_id, event_id=eid,
                 payload={"turn_number": turn_number, "message": message})
@@ -154,4 +156,3 @@ def structured_directive(session_id: str, event_type: str, text: str, *,
     }
     return base(event_type, session_id, payload=payload, project_id=project_id,
                 channel=channel, event_id=eid, parent_event_id=source_event_id)
-
