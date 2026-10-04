@@ -206,7 +206,11 @@ returning the same vector to every caller. This reduces duplicate CPU work under
 request bursts without changing retrieval scores. The authenticated `/metrics`
 endpoint reports aggregate query-embedding cache hits, encoder calls, coalesced
 waiters, and failures; it records no query or project identifiers. Production
-benefit depends on how often identical cold queries overlap.
+benefit depends on how often identical cold queries overlap. A loopback cold
+canary sent 12 identical concurrent searches: all 12 returned HTTP 200, while
+the counters recorded one encoder call, 11 coalesced waiters, and zero failures.
+The 105/109 ms median/max here includes concurrent database searches and is not
+a before/after latency claim.
 
 ### Post-rollout spot check (2026-10-04)
 
