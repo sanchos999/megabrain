@@ -203,6 +203,16 @@ query remains enabled. The E5 probe accepted all 12 cases but also hit only
 route. These are small, memory-derived proxy samples—not human labels, an SLA,
 or evidence that arbitrary questions are recalled perfectly.
 
+The same spot-check tested a conservative expansion of the RU/EN discussion
+question parser against 30 sampled explicit-memory topics (60 generated
+questions). With the literal-substring and confidence guard intact, 44 queries
+used exact-topic lookup, 10 exact-key lookup, and six retained hybrid BGE;
+the target was top-1 in all 60 with zero project leaks. Against the prior parser,
+which routed 50/60 through hybrid BGE, the in-process DB-path p50 was 0.73 ms
+versus 4.59 ms when both used the same precomputed BGE vectors. This excludes
+query-encoder time and is a memory-derived proxy, not a general human-query
+quality result.
+
 ## Context Capsule integration
 
 Capsule не заменяется vector-результатами. Structured current state имеет

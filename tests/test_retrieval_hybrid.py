@@ -104,6 +104,15 @@ def test_question_topic_extracts_only_supported_unambiguous_subjects():
     assert HybridRetriever._question_topic(
         "What is the next step for embedding worker?"
     ) == "embedding worker"
+    assert HybridRetriever._question_topic(
+        "Что мы обсуждали по теме memory retrieval?"
+    ) == "memory retrieval"
+    assert HybridRetriever._question_topic(
+        "В чём была ошибка при работе с embedding worker?"
+    ) == "embedding worker"
+    assert HybridRetriever._question_topic(
+        "What went wrong with memory indexing?"
+    ) == "memory indexing"
     assert HybridRetriever._question_topic("Что мы решили раньше по Hermes?") is None
     assert HybridRetriever._question_topic("What happened to Hermes last year?") is None
     assert HybridRetriever._question_topic("Что делать с этим?") is None

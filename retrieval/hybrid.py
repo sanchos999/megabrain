@@ -403,9 +403,14 @@ class HybridRetriever:
         normalized = " ".join((query or "").strip().split())
         patterns = (
             r"^(?:какое решение приняли|что мы решили|что решили)\s+(?:по(?:\s+теме)?|насч[её]т|про)\s+(.+?)[?.!]*$",
+            r"^(?:что мы обсуждали|что обсуждали|к чему пришли)\s+(?:по(?:\s+теме)?|про|насч[её]т|касательно)\s+(.+?)[?.!]*$",
             r"^(?:какие ограничения(?: нужно соблюдать)?|какие правила(?: нельзя нарушать)?)\s+(?:для|по(?:\s+теме)?|при работе с)\s+(.+?)[?.!]*$",
+            r"^(?:какая была ошибка|в ч[её]м была ошибка|что было не так)\s+(?:при работе с|с|в|при|по)\s+(.+?)[?.!]*$",
+            r"^(?:как исправили|как решили проблему)\s+(?:с|в|при|по)\s+(.+?)[?.!]*$",
             r"^(?:что нужно сделать|какой следующий шаг(?: остался)?)\s+(?:по(?:\s+задаче|\s+теме)?|для|с)\s+(.+?)[?.!]*$",
             r"^(?:what did we decide about|what decision did we make about|what did we choose for)\s+(.+?)[?.!]*$",
+            r"^(?:what did we discuss|what was the discussion about)\s+(?:about|for|regarding)\s+(.+?)[?.!]*$",
+            r"^(?:what was the error|what went wrong|what issue did we have)\s+(?:with|in|for)\s+(.+?)[?.!]*$",
             r"^(?:which constraints apply to|what rules apply to|what needs to be done for|what is the next step for)\s+(.+?)[?.!]*$",
         )
         for pattern in patterns:
