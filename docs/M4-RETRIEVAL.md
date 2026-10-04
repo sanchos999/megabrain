@@ -165,6 +165,30 @@ sample, p50/p95 was 7.96/39.76 ms. This is a narrow synthetic canary, not a
 human-judged real-query benchmark or an SLA; broader relevance validation is
 still needed before widening the E5 route.
 
+### Source-message retrieval and long-query probe (2026-10-04)
+
+`scripts/live_memory_quality_eval.py` now also samples original user messages
+linked to current explicit memories and requires the canonical item itself in
+the result (the raw source event does not count as a hit). On 68 such pairs,
+BGE returned the linked item at top-5 for 67/68 queries, with no project leaks
+or embedding failures. This remains a proxy: lexical overlap is uncontrolled,
+and it does not replace human relevance labels.
+
+The same sample compared the guarded E5 candidate path: its confidence gate
+accepted 66/68 queries, with the linked item at top-5 for 65/66 accepted cases.
+This does not beat the BGE baseline, so the gate must not be broadened. Two
+queries longer than 512 characters were much slower (about 82 ms median in this
+small bucket). Truncating the embedding input to 512 characters reduced the
+overall p95 to about 7 ms, but lost one additional canonical-item hit (66/68);
+that quality tradeoff is not enabled in production. Full query text continues
+to feed FTS and vector retrieval.
+
+Whitespace-only query normalization is enabled before BGE embedding and cache
+lookup, so equivalent formatting avoids duplicate inference while FTS continues
+to use the original query. Its unit regression test confirms one encoder call
+for whitespace-equivalent inputs; request-level latency is DB-dominated, so no
+material overall latency gain was measurable in the live paired probe.
+
 ## Context Capsule integration
 
 Capsule не заменяется vector-результатами. Structured current state имеет

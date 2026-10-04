@@ -23,6 +23,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from benchmark.onnx_e5_embed import EMBEDDING_MODEL_VERSION as E5_MODEL_VERSION
 from retrieval.hybrid import HybridRetriever
 from scripts.retrieval_quality_eval import _embed_many, _loopback_embed_url
 
@@ -146,8 +147,12 @@ def _evaluate_api(records: list[dict], token: str, *, query_field: str = "questi
     fast_server: list[float] = []
     full_server: list[float] = []
     ranks: list[int] = []
+    target_ranks: list[int | None] = []
+    target_miss_top_scores: list[float] = []
+    top_scores: list[float] = []
     skipped_key = skipped_topic = degraded = project_leaks = 0
     retrieval_paths: dict[str, int] = {}
+    length_buckets: dict[str, list[float]] = {}
     for index, record in enumerate(records, 1):
         # Trailing whitespace is tokenizer-equivalent but defeats the exact
         # query-vector cache, so semantic fallback timings remain cache-cold.
@@ -170,6 +175,10 @@ def _evaluate_api(records: list[dict], token: str, *, query_field: str = "questi
         times.append((time.perf_counter() - started) * 1000)
         server_time = float(result.get("latency_ms", 0))
         server_times.append(server_time)
+        if require_item_match:
+            query_length = len(base_query)
+            bucket = "<=160" if query_length <= 160 else "161-512" if query_length <= 512 else ">512"
+            length_buckets.setdefault(bucket, []).append(server_time)
         path = str(result.get("retrieval_path", "unknown"))
         retrieval_paths[path] = retrieval_paths.get(path, 0) + 1
         if result.get("vector_skipped"):
@@ -183,16 +192,24 @@ def _evaluate_api(records: list[dict], token: str, *, query_field: str = "questi
         degraded += int(result.get("vector_degraded", True))
         project_leaks += sum(1 for hit in result.get("results", [])
                              if hit.get("project_id") != record["project_id"])
+        if require_item_match and result.get("results"):
+            top_scores.append(float(result["results"][0].get("score") or 0))
+        target_rank = None
         for rank, hit in enumerate(result.get("results", []), 1):
             if require_item_match:
                 if hit.get("memory_item_id") == record["item_id"]:
                     ranks.append(rank)
+                    target_rank = rank
                     break
                 continue
             source_match = bool(record["source_ids"] & set(hit.get("source_event_ids") or []))
             if hit.get("memory_item_id") == record["item_id"] or source_match:
                 ranks.append(rank)
                 break
+        if require_item_match:
+            target_ranks.append(target_rank)
+            if target_rank is None and result.get("results"):
+                target_miss_top_scores.append(float(result["results"][0].get("score") or 0))
 
     sorted_times = sorted(times)
     sorted_server = sorted(server_times)
@@ -206,6 +223,12 @@ def _evaluate_api(records: list[dict], token: str, *, query_field: str = "questi
         "vector_skipped_exact_topic": skipped_topic,
         "semantic_fallback_queries": len(records) - skipped_key - skipped_topic,
         "retrieval_paths": retrieval_paths,
+        "server_latency_by_query_length_ms": {
+            bucket: {"queries": len(values), "p50": round(statistics.median(values), 2),
+                     "p95": round(sorted(values)[min(len(values) - 1,
+                                                       int(len(values) * 0.95))], 2)}
+            for bucket, values in length_buckets.items()
+        },
         "vector_degraded_queries": degraded,
         "project_leaks": project_leaks,
         "http_p50_ms": round(statistics.median(sorted_times), 2),
@@ -216,15 +239,20 @@ def _evaluate_api(records: list[dict], token: str, *, query_field: str = "questi
         "semantic_fallback_http_p50_ms": p50(full_http),
         "fast_path_server_p50_ms": p50(fast_server),
         "semantic_fallback_server_p50_ms": p50(full_server),
+        **({
+            "target_not_in_top_50": sum(rank is None for rank in target_ranks),
+            "target_miss_top_result_score_median": p50(target_miss_top_scores),
+            "top_result_score_median": p50(top_scores),
+        } if require_item_match else {}),
     }
 
 
 def _whitespace_cache_probe(records: list[dict], token: str) -> dict:
     cold, equivalent = [], []
     for index, record in enumerate(records[:20], 1):
-        query = record["source_query"]
+        query = f"{record['source_query']}\nmbcacheprobe{index}"
         times = []
-        for formatted in (f"{query}\n", f" \t{query}  \n"):
+        for formatted in (query, f" \t{record['source_query']}   mbcacheprobe{index}\n"):
             payload = json.dumps({
                 "query": formatted, "mode": "WARM", "limit": 10,
                 "project_id": record["project_id"],
@@ -251,6 +279,74 @@ def _whitespace_cache_probe(records: list[dict], token: str) -> dict:
         "paired_semantic_queries": len(cold),
         "first_format_server_p50_ms": p50(cold),
         "equivalent_whitespace_format_server_p50_ms": p50(equivalent),
+    }
+
+
+def _e5_source_probe(records: list[dict], dsn: str, token: str) -> dict:
+    encoded: list[list[float]] = []
+    batch_ms: list[float] = []
+    for start in range(0, len(records), 8):
+        batch = records[start:start + 8]
+        request = urllib.request.Request(
+            "http://127.0.0.1:4300/v1/internal/e5-embeddings",
+            data=json.dumps({
+                "texts": [record["source_query"] for record in batch],
+                "kind": "query",
+            }).encode(),
+            headers={"Content-Type": "application/json", **(
+                {"Authorization": f"Bearer {token}"} if token else {})},
+            method="POST",
+        )
+        started = time.perf_counter()
+        with urllib.request.urlopen(request, timeout=45) as response:
+            result = json.loads(response.read())
+        batch_ms.append((time.perf_counter() - started) * 1000 / len(batch))
+        if result.get("model_version") != E5_MODEL_VERSION:
+            raise RuntimeError("E5 model version differs from the indexed model.")
+        encoded.extend(result.get("vectors") or [])
+
+    ranks: list[int | None] = []
+    accepted_ranks: list[int | None] = []
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        if conn.execute("SHOW transaction_read_only").fetchone()[0] != "on":
+            raise RuntimeError("Database connection is not read-only.")
+        for record, vector in zip(records, encoded, strict=True):
+            literal = "[" + ",".join(f"{float(value):.6f}" for value in vector) + "]"
+            rows = conn.execute(
+                """SELECT mi.item_id, 1-(mie.embedding <=> %s::vector) AS similarity
+                     FROM memory_item_embeddings_e5 mie
+                     JOIN memory_items mi ON mi.item_id=mie.item_id
+                    WHERE mie.model_version=%s AND mie.dimension=384
+                      AND mi.project_id=%s AND mi.valid_to IS NULL
+                      AND mi.extractor_type='EXPLICIT' AND mi.confidence>=0.9
+                      AND mi.kind IN ('DECISION','CONSTRAINT','TASK')
+                      AND COALESCE(mi.content->>'status','') NOT IN ('REJECTED','SUPERSEDED')
+                      AND COALESCE(mi.content->>'content_status','') <> 'REJECTED_EMPTY'
+                    ORDER BY mie.embedding <=> %s::vector LIMIT 20""",
+                (literal, E5_MODEL_VERSION, record["project_id"], literal),
+            ).fetchall()
+            rank = next((i for i, row in enumerate(rows, 1)
+                         if row[0] == record["item_id"]), None)
+            ranks.append(rank)
+            if len(rows) >= 2:
+                confident = (float(rows[0][1]) >= 0.80
+                             and float(rows[0][1]) - float(rows[1][1]) >= 0.02)
+                if confident:
+                    accepted_ranks.append(rank)
+
+    return {
+        "queries": len(records),
+        "hit_at_5": round(sum(rank is not None and rank <= 5 for rank in ranks)
+                           / max(1, len(ranks)), 4),
+        "top_1": sum(rank == 1 for rank in ranks),
+        "confident_gate_accepts": len(accepted_ranks),
+        "accepted_target_hit_at_5": round(sum(
+            rank is not None and rank <= 5 for rank in accepted_ranks)
+            / max(1, len(accepted_ranks)), 4) if accepted_ranks else None,
+        "accepted_target_top_1": sum(rank == 1 for rank in accepted_ranks),
+        "accepted_target_not_top_1": sum(rank != 1 for rank in accepted_ranks),
+        "encoder_http_ms_per_query_p50": round(statistics.median(batch_ms), 2)
+        if batch_ms else None,
     }
 
 
@@ -283,7 +379,21 @@ def run() -> int:
     source_records = [record for record in records if len(record["source_query"]) >= 20]
     source_query_metrics = _evaluate_api(
         source_records, token, query_field="source_query", require_item_match=True)
+    for record in source_records:
+        record["source_query_256"] = record["source_query"][:256]
+        record["source_query_512"] = record["source_query"][:512]
+        source = record["source_query"]
+        record["source_query_head_tail_512"] = (
+            source[:256] + " " + source[-256:] if len(source) > 512 else source)
+    source_256_metrics = _evaluate_api(
+        source_records, token, query_field="source_query_256", require_item_match=True)
+    source_512_metrics = _evaluate_api(
+        source_records, token, query_field="source_query_512", require_item_match=True)
+    source_head_tail_metrics = _evaluate_api(
+        source_records, token, query_field="source_query_head_tail_512",
+        require_item_match=True)
     whitespace_cache_metrics = _whitespace_cache_probe(source_records, token)
+    e5_source_metrics = _e5_source_probe(source_records, dsn, token)
     result = {
         "evaluation": "generated questions from explicit current memories; proxy, not human-judged",
         "queries": len(records),
@@ -297,7 +407,13 @@ def run() -> int:
             "queries": len(source_records),
             **source_query_metrics,
         },
+        "source_message_truncation_probes": {
+            "256_chars": source_256_metrics,
+            "512_chars": source_512_metrics,
+            "head_tail_512_chars": source_head_tail_metrics,
+        },
         "whitespace_equivalent_cache_probe": whitespace_cache_metrics,
+        "e5_source_message_probe": e5_source_metrics,
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     unsafe = metrics["project_leaks"] or metrics["vector_degraded_queries"]
