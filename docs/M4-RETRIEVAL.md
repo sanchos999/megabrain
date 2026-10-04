@@ -290,6 +290,15 @@ over 512 characters, embedding latency changed from 225 ms median/331 ms max to
 post-deploy quality and latency checks remain required; the configurable cap is
 `retrieval_query_max_tokens` (64–512, default 128).
 
+On the first post-restart source canary, one of four >512-character queries
+spiked to 3.1 s; an immediate warm replay of the same 229-pair sample measured
+186.7 ms p95 for that length bucket. The cold run also exercised the single
+`e5_confident_semantic` route, which lazily initializes its optional ONNX
+session. This correlation points to cold model initialization, not query
+length, as the likely outlier cause. When that optional route is enabled,
+startup now prewarms E5 as well as BGE; a failed E5 prewarm is counted and BGE
+remains available as fallback.
+
 ## Context Capsule integration
 
 Capsule не заменяется vector-результатами. Structured current state имеет

@@ -59,6 +59,19 @@ async def lifespan(_app: FastAPI):
         # Retrieval still has a documented FTS-only fallback; startup must not
         # make the durable event API unavailable because a model is missing.
         STATE["telemetry"].inc(f"retrieval_model_prewarm_error:{type(error).__name__}")
+    if _get_retriever().cfg.get("retrieval_e5_fast_path", False):
+        try:
+            from benchmark.onnx_e5_embed import encode as encode_e5
+
+            await run_in_threadpool(
+                encode_e5, ["warmup"], kind="query",
+                threads=int(_get_retriever().cfg.get("e5_threads", 4)),
+            )
+            STATE["telemetry"].inc("retrieval_e5_model_prewarm_ok")
+        except Exception as error:
+            # E5 is an optional fast path; failure leaves BGE retrieval available.
+            STATE["telemetry"].inc(
+                f"retrieval_e5_model_prewarm_error:{type(error).__name__}")
     yield
 
 
