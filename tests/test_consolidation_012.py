@@ -4,7 +4,14 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
-from consolidation.worker import ConsolidationWorker, Settings, eligibility, importance_signal, prefilter
+from consolidation.worker import (
+    ConsolidationWorker,
+    PostgresSchedulerRepository,
+    Settings,
+    eligibility,
+    importance_signal,
+    prefilter,
+)
 
 
 class FakePG:
@@ -31,7 +38,7 @@ class FakeRepo:
     """Mirrors the scheduler contract; tracks recorded run values."""
     def __init__(self, projects):
         self.pg = FakePG(); self.projects = projects; self.runs = []; self.calls = 0
-        self.explicit = set(); self.tokens_used = 0
+        self.explicit = set(); self.tokens_used = 0; self.success_batches = []
     def eligible_project(self):
         now = datetime.now(UTC); ready = []
         for project, data in self.projects.items():
@@ -57,6 +64,7 @@ class FakeRepo:
             if r[0] == project and r[1] == digest: self.runs[i] = (project, digest, status, values); return
         self.runs.append((project, digest, status, values))
     def success(self, project, events, *, commit=True):
+        self.success_batches.append((project, list(events)))
         self.projects[project]["events"] = self.projects[project]["events"][len(events):]
         self.projects[project]["first"] = datetime.now(UTC)
         self.projects[project]["next"] = datetime.now(UTC) + timedelta(seconds=900)
@@ -141,9 +149,10 @@ def test_reported_tokens_recorded_as_reported():
 # ---- adaptive batching windows (§21)
 def test_adaptive_eligibility_windows():
     s = Settings(idle_s_important=900, idle_s_large=1800, idle_s_medium=7200,
-                 idle_s_small=43200, abs_max_wait_s=86400, large_n=20, medium_n=5)
-    # 1-4 normal events wait the small window (6-12h)
-    assert not eligibility(3, age_dirty_s=3600, age_first_s=3600, important=False, s=s)
+                 idle_s_small=3600, abs_max_wait_s=86400, large_n=20, medium_n=5)
+    # 1-4 normal events wait one hour; the global dispatch budget remains separate.
+    assert not eligibility(3, age_dirty_s=1800, age_first_s=1800, important=False, s=s)
+    assert eligibility(3, age_dirty_s=3600, age_first_s=3600, important=False, s=s)
     # importance fast path: eligible after 15 min idle
     assert eligibility(3, age_dirty_s=1000, age_first_s=1000, important=True, s=s)
     # 20+ events: 30 min
@@ -156,6 +165,94 @@ def test_adaptive_eligibility_windows():
     assert eligibility(1, age_dirty_s=60, age_first_s=86500, important=False, s=s)
     # nothing pending -> never eligible
     assert not eligibility(0, age_dirty_s=9e9, age_first_s=9e9, important=False, s=s)
+
+
+def test_scheduler_recounts_all_unprocessed_events_after_cursor_advance():
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params):
+            self.sql, self.params = sql, params
+
+    class Connection:
+        def __init__(self):
+            self.cur = Cursor()
+
+        def cursor(self):
+            return self.cur
+
+        def commit(self):
+            pass
+
+    class PG:
+        def __init__(self):
+            self.conn = Connection()
+
+    pg = PG()
+    repository = PostgresSchedulerRepository(pg, Settings())
+    repository.success("project-a", [{"event_id": "cursor-100"}], commit=False)
+
+    sql, params = pg.conn.cur.sql, pg.conn.cur.params
+    assert "pending_event_count=(SELECT count(*) FROM events e" in sql
+    assert "last_consolidated_event_id=COALESCE(%s,last_consolidated_event_id)" in sql
+    assert "GREATEST(0,pending_event_count-" not in sql
+    assert params[0] == params[3] == params[4] == "cursor-100"
+
+
+def test_noise_only_window_advances_watermark_without_llm():
+    r = repo("A", age_minutes=150, count=2)
+    r.projects["A"]["events"] = [event("A", 1, "ok"), event("A", 2, "thanks")]
+
+    result = ConsolidationWorker(r, StageTransport()).run_once()
+
+    assert result["status"] == "no_llm"
+    assert r.calls == 0
+    assert [e["event_id"] for e in r.success_batches[0][1]] == ["evt_A_1", "evt_A_2"]
+    assert r.projects["A"]["events"] == []
+
+
+def test_scheduler_fetches_bounded_raw_events_before_python_prefilter():
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params):
+            self.sql, self.params = sql, params
+
+        @property
+        def description(self):
+            return []
+
+        def fetchall(self):
+            return []
+
+    class Connection:
+        def __init__(self):
+            self.cur = Cursor()
+
+        def cursor(self):
+            return self.cur
+
+    class PG:
+        def __init__(self):
+            self.conn = Connection()
+
+    pg = PG()
+    repository = PostgresSchedulerRepository(pg, Settings(max_batch_events=17))
+    assert repository.events("project-a") == []
+    sql, params = pg.conn.cur.sql, pg.conn.cur.params
+    assert "length(trim" not in sql and "technical_echo" not in sql
+    assert params[0] == "project-a" and set(params[1]) == {
+        "USER_MESSAGE", "ASSISTANT_MESSAGE", "ERROR", "TEST_RESULT", "FILE_WRITE", "SHELL_RESULT"
+    }
+    assert params[2] == 17
 
 
 def test_importance_fast_path_dispatches_early():

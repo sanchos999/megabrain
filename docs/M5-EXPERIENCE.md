@@ -38,6 +38,15 @@ LLM никогда не объявляет confirmed fact. Каждый derived 
   supersedes старый (valid_to), история не удаляется.
 - Ресурсы: `megabrain-consolidation-worker.service`, Nice=15, CPUQuota=150%,
   MemoryHigh=3G/MemoryMax=4G, flock single-instance, SIGTERM-safe.
+- Для обычных малых пачек (1–4 meaningful events) окно тишины — 1 час;
+  прежнее окно 12 часов слишком задерживало появление устойчивой long-term
+  memory. Аварийный предел 1 LLM-вызов/час и суточные/месячные бюджетные
+  ограничения сохраняются; уже явно сохранённые source events продвигаются
+  без повторного LLM-вызова.
+- Worker читает ограниченное окно исходных meaningful events до Python-prefilter;
+  если окно содержит только шум/короткие события/technical echoes, watermark
+  всё равно проходит просмотренное окно без LLM. Иначе такой хвост мог навсегда
+  оставить ненулевой счётчик очереди при отсутствии пригодного текста.
 
 ## Retrieval (M5 §18)
 

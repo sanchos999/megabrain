@@ -67,7 +67,7 @@ class Settings:
     idle_s_important: int = _env_int("MB_CONSOLIDATION_IDLE_S_IMPORTANT", 900)      # 5-15 min: HIGH/CRITICAL fast path
     idle_s_large: int = _env_int("MB_CONSOLIDATION_IDLE_S_LARGE", 1800)             # 20+ meaningful events
     idle_s_medium: int = _env_int("MB_CONSOLIDATION_IDLE_S_MEDIUM", 7200)           # 5-19 events
-    idle_s_small: int = _env_int("MB_CONSOLIDATION_IDLE_S_SMALL", 43200)            # 1-4 events
+    idle_s_small: int = _env_int("MB_CONSOLIDATION_IDLE_S_SMALL", 3600)             # 1-4 events: 1h
     abs_max_wait_s: int = _env_int("MB_CONSOLIDATION_ABS_MAX_WAIT_S", 86400)        # 24h absolute cap
     large_n: int = _env_int("MB_CONSOLIDATION_LARGE_N", 20)
     medium_n: int = _env_int("MB_CONSOLIDATION_MEDIUM_N", 5)
@@ -403,12 +403,27 @@ class PostgresSchedulerRepository:
             self.pg.conn.commit()
 
     def success(self, project_id: str, events: list[dict], *, commit: bool = True) -> None:
+        last_event_id = events[-1]["event_id"] if events else None
         with self.pg.conn.cursor() as cur:
-            cur.execute("""UPDATE consolidation_projects SET last_consolidated_event_id=%s,
-                pending_event_count=GREATEST(0,pending_event_count-%s), retry_count=0,last_error=NULL,
+            cur.execute("""UPDATE consolidation_projects c SET
+                last_consolidated_event_id=COALESCE(%s,last_consolidated_event_id),
+                pending_event_count=(SELECT count(*) FROM events e
+                  WHERE e.project_id=c.project_id AND e.event_type=ANY(%s)
+                    AND length(trim(COALESCE(NULLIF(e.payload->>'text',''),
+                                             NULLIF(e.payload->>'content',''),''))) >= 12
+                    AND lower(trim(COALESCE(NULLIF(e.payload->>'text',''),
+                                            NULLIF(e.payload->>'content',''),''))) <> ALL(%s)
+                    AND e.metadata->>'technical_echo' IS DISTINCT FROM 'true'
+                    AND (COALESCE(%s,c.last_consolidated_event_id) IS NULL
+                      OR (e.created_at,e.event_id) >
+                        (SELECT created_at,event_id FROM events
+                          WHERE event_id=COALESCE(%s,c.last_consolidated_event_id)))),
+                retry_count=0,last_error=NULL,
                 rate_paused=false,last_block_reason=NULL,
                 last_success_at=now(),next_eligible_at=now()+(%s || ' seconds')::interval,updated_at=now()
-                WHERE project_id=%s""", (events[-1]["event_id"] if events else None, len(events), self.settings.cooldown_s, project_id))
+                WHERE c.project_id=%s""",
+                (last_event_id, list(MEANINGFUL), list(NOISE), last_event_id,
+                 last_event_id, str(self.settings.cooldown_s), project_id))
         if commit:
             self.pg.conn.commit()
 
@@ -556,12 +571,16 @@ class ConsolidationWorker:
         if not project:
             self.heartbeat.update(state="IDLE", success=True, reset_errors=False)
             return {"status": "idle", "llm_calls": 0}
-        events = prefilter(self.repository.events(project))
+        # Fetch a bounded raw window first. Filtering in SQL strands the
+        # watermark when every event in the window is noise/technical echo:
+        # the worker sees no rows and can never advance past them.
+        scanned = self.repository.events(project)
+        events = prefilter(scanned)
         explicit = self.repository.explicit_source_ids(project)
-        scanned = events
         events = [event for event in events if event["event_id"] not in explicit]
         if not events:
-            # Nothing meaningful: advance watermark without LLM so the queue drains.
+            # No new candidate memory: advance across the entire inspected
+            # window (including filtered noise and already-explicit sources).
             self.repository.success(project, scanned)
             self.heartbeat.update(state="RUNNING", success=True, reset_errors=False, processed_items=len(scanned))
             return {"status": "no_llm", "llm_calls": 0, "advanced": len(scanned)}

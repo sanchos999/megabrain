@@ -208,6 +208,9 @@ class Postgres:
                            (project_id, first_dirty_at, last_dirty_at, pending_event_count, next_eligible_at)
                            VALUES (%s, now(), now(), 1, now() + interval '15 minutes')
                            ON CONFLICT (project_id) DO UPDATE SET
+                             first_dirty_at=CASE
+                               WHEN consolidation_projects.pending_event_count=0 THEN now()
+                               ELSE consolidation_projects.first_dirty_at END,
                              last_dirty_at=now(),
                              pending_event_count=consolidation_projects.pending_event_count + 1,
                              next_eligible_at=now() + interval '15 minutes',
