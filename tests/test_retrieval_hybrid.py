@@ -101,7 +101,7 @@ def test_exact_current_item_key_skips_onnx_but_keeps_provenance():
     retriever._encode_query = lambda _query: (_ for _ in ()).throw(AssertionError("ONNX should be skipped"))
 
     result = retriever.search(
-        "Какие ограничения соблюдать для ключа: vector_backend?", mode="WARM",
+        "Какие ограничения соблюдать для vector_backend?", mode="WARM",
         limit=5, project_id="project-1",
     )
 
@@ -133,7 +133,7 @@ def test_delimited_topic_requires_literal_high_confidence_fts_match():
             self.calls.append((sql, params))
 
         def fetchall(self):
-            return [] if len(self.calls) == 1 else [row]
+            return [row]
 
     class Connection:
         def __init__(self):
@@ -152,8 +152,8 @@ def test_delimited_topic_requires_literal_high_confidence_fts_match():
         limit=5, project_id="project-1",
     )
 
-    assert len(conn.cursor_value.calls) == 2
-    assert conn.cursor_value.calls[1][1]["q"] == "memory consolidation policy"
+    assert len(conn.cursor_value.calls) == 1
+    assert conn.cursor_value.calls[0][1]["q"] == "memory consolidation policy"
     assert result["vector_skipped"] == "exact_item_topic"
     assert result["results"][0]["memory_item_id"] == "item-2"
 
@@ -191,7 +191,8 @@ def test_unmatched_explicit_key_falls_back_to_semantic_hybrid_search():
     result = retriever.search(query, mode="WARM", limit=5)
 
     calls = conn.cursor_value.calls
-    assert calls[0][1]["item_key"] == "missing_key_998"
+    assert calls[0][1]["q"] == "missing_key_998"
+    assert calls[1][1]["item_key"] == "missing_key_998"
     assert calls[2][1]["q"] == query
     assert result["vector_leg"] is True
     assert result["vector_skipped"] is None

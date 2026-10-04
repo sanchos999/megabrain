@@ -373,29 +373,24 @@ class HybridRetriever:
         try:
             with conn.cursor() as cur:
                 key = self._exact_item_key(query)
+                topic = self._delimited_topic(query)
                 history_request = any(marker in query.lower() for marker in (
                     "раньше", "предыдущ", "истори", "до этого", "previous", "earlier", "history", "before",
                 ))
                 exact_rows = []
                 if key and not deep and at_time is None and not history_request:
                     item_extra, item_params = self._item_where(False, project_id, session_id, None)
-                    cur.execute(
-                        self.ITEM_KEY_SQL + item_extra
-                        + " order by mi.confidence desc, mi.valid_from desc limit %(lim)s",
-                        {"item_key": key, "lim": max(limit * 3, 20), **item_params},
-                    )
-                    exact_rows = self._fetch(cur)
-                    if not exact_rows and self._delimited_topic(query):
+                    if topic:
                         cur.execute(
                             self.ITEM_FTS_SQL + item_extra
                             + " and mi.confidence >= 0.9 and mi.extractor_type = 'EXPLICIT'"
                               " and coalesce(mi.content->>'status', '') not in ('REJECTED', 'SUPERSEDED')"
                               " and coalesce(mi.content->>'content_status', '') <> 'REJECTED_EMPTY'"
                             + " order by mi.confidence desc, mi.valid_from desc limit %(lim)s",
-                            {"q": key, "lim": max(limit * 3, 20), **item_params},
+                            {"q": topic, "lim": max(limit * 3, 20), **item_params},
                         )
                         topic_rows = self._fetch(cur)
-                        normalized_key = " ".join(key.casefold().split())
+                        normalized_key = " ".join(topic.casefold().split())
                         exact_rows = [
                             row for row in topic_rows
                             if normalized_key in " ".join((row[8] or "").casefold().split())
@@ -403,6 +398,13 @@ class HybridRetriever:
                         if exact_rows:
                             vector_skipped = True
                             vector_skip_reason = "exact_item_topic"
+                    if not exact_rows:
+                        cur.execute(
+                            self.ITEM_KEY_SQL + item_extra
+                            + " order by mi.confidence desc, mi.valid_from desc limit %(lim)s",
+                            {"item_key": key, "lim": max(limit * 3, 20), **item_params},
+                        )
+                        exact_rows = self._fetch(cur)
                 if exact_rows:
                     event_fts, item_fts = [], exact_rows
                     event_vec, item_vec, vec_ok = [], [], False
