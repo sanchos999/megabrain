@@ -165,6 +165,16 @@ sample, p50/p95 was 7.96/39.76 ms. This is a narrow synthetic canary, not a
 human-judged real-query benchmark or an SLA; broader relevance validation is
 still needed before widening the E5 route.
 
+### Shared encoder memory snapshot (2026-10-05)
+
+Both background indexers use the API's loopback embedding endpoints rather than
+loading their own ONNX sessions (`embedding-worker` reports “using shared model”;
+the E5 indexer calls the internal E5 endpoint). Current systemd cgroup snapshots
+were approximately 1.4 GiB for the API, 197 MiB for the BGE worker, and 66 MiB
+for the E5 shadow worker. These are point-in-time service totals, not private
+memory baselines; they confirm there is no second ~1 GiB BGE session in either
+worker to remove without undoing the shared-encoder design.
+
 ### Source-message retrieval and long-query probe (2026-10-04)
 
 `scripts/live_memory_quality_eval.py` now also samples original user messages
