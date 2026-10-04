@@ -121,6 +121,45 @@ def test_simultaneous_identical_query_embeddings_are_single_flight():
     }
 
 
+def test_failed_single_flight_releases_waiters_and_allows_retry():
+    class FakeVector:
+        def tolist(self):
+            return [0.75] * 1024
+
+    class FakeEmbedder:
+        def __init__(self):
+            self.calls = 0
+
+        def encode(self, texts, max_length):
+            self.calls += 1
+            time.sleep(0.05)
+            if self.calls == 1:
+                raise RuntimeError("synthetic encoder failure")
+            return [FakeVector()]
+
+    workers = 8
+    barrier = threading.Barrier(workers)
+    retriever = HybridRetriever({"retrieval_query_cache_max": 0})
+    retriever._embedder = FakeEmbedder()
+
+    def encode():
+        barrier.wait()
+        return retriever._encode_query("retry after shared failure")
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        failed_results = list(pool.map(lambda _index: encode(), range(workers)))
+
+    assert failed_results == [None] * workers
+    assert retriever._query_inflight == {}
+    assert retriever._encode_query("retry after shared failure") == [0.75] * 1024
+    assert retriever.query_embedding_metrics() == {
+        "cache_hits": 0,
+        "encoder_calls": 2,
+        "coalesced_waiters": workers - 1,
+        "encoder_failures": 1,
+    }
+
+
 def test_exact_item_key_detection_requires_one_explicit_identifier():
     assert HybridRetriever._exact_item_key("Какие ограничения для vector_backend?") == "vector_backend"
     assert HybridRetriever._exact_item_key("Какие ограничения для темы: память консолидации?") == "память консолидации"

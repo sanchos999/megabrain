@@ -202,7 +202,8 @@ material overall latency gain was measurable in the live paired probe.
 Cold-cache concurrent requests for the same normalized query now share one
 in-flight BGE embedding; unrelated queries remain concurrent. A 12-thread
 regression test confirms one encoder invocation instead of twelve while
-returning the same vector to every caller. This reduces duplicate CPU work under
+returning the same vector to every caller; a concurrent failure test confirms
+waiters are released and a later retry can succeed. This reduces duplicate CPU work under
 request bursts without changing retrieval scores. The authenticated `/metrics`
 endpoint reports aggregate query-embedding cache hits, encoder calls, coalesced
 waiters, and failures; it records no query or project identifiers. Production
