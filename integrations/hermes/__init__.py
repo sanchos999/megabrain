@@ -368,7 +368,11 @@ class MegaBrainProvider(MemoryProvider):
                  "action": {"type": "string", "enum": ["show", "set", "clear"]},
                  "project_id": {"type": "string"},
                  "name": {"type": "string"}}, "required": ["action"]}},
-            {"name": "memory_search", "description": "Поиск по памяти (FTS+vector+temporal).",
+            {"name": "memory_search", "description": (
+                 "Поиск по памяти (FTS+vector+temporal). Если пользователь ясно называет "
+                 "конкретную тему, передай короткую точную фразу (2–10 слов) без пересказа. "
+                 "Не выдумывай ключи. Для истории, широких или неоднозначных запросов передавай "
+                 "полный вопрос — semantic vector fallback сохранён."),
              "parameters": {"type": "object", "properties": {
                  "query": {"type": "string"}, "mode": {"type": "string"}},
                  "required": ["query"]}},

@@ -50,6 +50,16 @@ def test_select_mode(mod):
     assert mod.select_mode("в других проектах") == "DEEP"
 
 
+def test_memory_search_schema_encourages_safe_short_topics(mod):
+    schema = next(tool for tool in mod.MegaBrainProvider().get_tool_schemas()
+                  if tool["name"] == "memory_search")
+    description = schema["description"].lower()
+    assert "короткую точную фразу" in description
+    assert "не выдумывай ключи" in description
+    assert "истории" in description
+    assert "fallback сохранён" in description
+
+
 def test_channel_mapping(mod):
     assert mod._channel_from_kwargs("", "telegram") == "telegram"
     assert mod._channel_from_kwargs("subagent", "") == "subagent"

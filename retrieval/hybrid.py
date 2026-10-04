@@ -330,7 +330,7 @@ class HybridRetriever:
             "где", "когда", "почему", "зачем", "кто", "сколько", "was", "were",
             "what", "which", "where", "when", "why", "how", "who", "does", "did",
         }
-        if 1 <= len(words) <= 10 and words[0].casefold() not in question_starters:
+        if 2 <= len(words) <= 10 and words[0].casefold() not in question_starters:
             return candidate
         return None
 
@@ -388,7 +388,8 @@ class HybridRetriever:
                 key = self._exact_item_key(query)
                 topic = self._delimited_topic(query) or (None if key else self._short_topic(query))
                 history_request = any(marker in query.lower() for marker in (
-                    "раньше", "предыдущ", "истори", "до этого", "previous", "earlier", "history", "before",
+                    "раньше", "предыдущ", "истори", "до этого", "прошл", "было", "были", "был",
+                    "previous", "earlier", "history", "before", "prior", "last year", "old",
                 ))
                 exact_rows = []
                 if (key or topic) and not deep and at_time is None and not history_request:
