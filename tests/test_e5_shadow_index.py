@@ -1,3 +1,7 @@
+import asyncio
+import json
+from types import SimpleNamespace
+
 import numpy as np
 
 from benchmark.onnx_e5_embed import mean_pool
@@ -120,3 +124,17 @@ def test_e5_semantic_gate_requires_score_and_margin(monkeypatch):
     cur.fetchall = lambda: [row, row[:-1] + (0.86,)]
     assert retriever._confident_e5_items(cur, "ambiguous query", 5,
                                          "project-a", None) is None
+
+
+def test_e5_internal_endpoint_returns_json_serializable_vectors(monkeypatch):
+    from api.main import E5EmbeddingBatchIn, internal_e5_embeddings
+
+    monkeypatch.setattr("benchmark.onnx_e5_embed.encode",
+                        lambda *_args, **_kwargs: np.ones((1, 384), dtype=np.float32))
+    request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+    result = asyncio.run(internal_e5_embeddings(
+        E5EmbeddingBatchIn(texts=["sample"], kind="query"), request,
+    ))
+
+    assert result["dimension"] == 384
+    assert json.loads(json.dumps(result))["vectors"][0][0] == 1.0

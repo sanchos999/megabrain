@@ -442,7 +442,7 @@ async def internal_e5_embeddings(body: E5EmbeddingBatchIn, request: Request):
     return {
         "model_version": EMBEDDING_MODEL_VERSION,
         "dimension": EMBEDDING_DIM,
-        "vectors": vectors,
+        "vectors": vectors.tolist(),
     }
 
 
