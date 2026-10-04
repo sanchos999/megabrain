@@ -223,7 +223,14 @@ async def version():
 
 @app.get("/metrics")
 async def metrics(_=Depends(require_auth)):
-    return STATE["telemetry"].snapshot()
+    snapshot = STATE["telemetry"].snapshot()
+    snapshot["query_embeddings"] = (
+        _retriever.query_embedding_metrics() if _retriever is not None else {
+            "cache_hits": 0, "encoder_calls": 0,
+            "coalesced_waiters": 0, "encoder_failures": 0,
+        }
+    )
+    return snapshot
 
 
 # ---------- events ----------

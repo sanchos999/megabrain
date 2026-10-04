@@ -203,9 +203,10 @@ Cold-cache concurrent requests for the same normalized query now share one
 in-flight BGE embedding; unrelated queries remain concurrent. A 12-thread
 regression test confirms one encoder invocation instead of twelve while
 returning the same vector to every caller. This reduces duplicate CPU work under
-request bursts without changing retrieval scores; production impact depends on
-how often identical cold queries overlap, which is not yet separately
-instrumented.
+request bursts without changing retrieval scores. The authenticated `/metrics`
+endpoint reports aggregate query-embedding cache hits, encoder calls, coalesced
+waiters, and failures; it records no query or project identifiers. Production
+benefit depends on how often identical cold queries overlap.
 
 ### Post-rollout spot check (2026-10-04)
 

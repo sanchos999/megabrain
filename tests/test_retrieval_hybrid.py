@@ -113,6 +113,12 @@ def test_simultaneous_identical_query_embeddings_are_single_flight():
     assert results == [[0.5] * 1024] * workers
     assert retriever._embedder.calls == 1
     assert retriever._query_inflight == {}
+    assert retriever.query_embedding_metrics() == {
+        "cache_hits": 0,
+        "encoder_calls": 1,
+        "coalesced_waiters": workers - 1,
+        "encoder_failures": 0,
+    }
 
 
 def test_exact_item_key_detection_requires_one_explicit_identifier():

@@ -168,6 +168,12 @@ class HybridRetriever:
         self._query_cache_lock = threading.Lock()
         self._query_cache: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()
         self._query_inflight: dict[str, Future[list[float] | None]] = {}
+        self._query_stats = {
+            "cache_hits": 0,
+            "encoder_calls": 0,
+            "coalesced_waiters": 0,
+            "encoder_failures": 0,
+        }
         self._query_cache_max = max(0, int(self.cfg.get("retrieval_query_cache_max", 256)))
         self._query_cache_ttl = max(0.0, float(self.cfg.get("retrieval_query_cache_ttl_s", 300)))
 
@@ -199,6 +205,11 @@ class HybridRetriever:
         finally:
             self._local.conn = None
 
+    def query_embedding_metrics(self) -> dict[str, int]:
+        """Return privacy-safe process-local counters for query embeddings."""
+        with self._query_cache_lock:
+            return dict(self._query_stats)
+
     # --- vector leg -----------------------------------------------------
 
     def _encode_query(self, query: str) -> list[float] | None:
@@ -215,6 +226,7 @@ class HybridRetriever:
                 created, vector = cached
                 if not self._query_cache_ttl or now - created < self._query_cache_ttl:
                     self._query_cache.move_to_end(cache_key)
+                    self._query_stats["cache_hits"] += 1
                     return list(vector)
                 self._query_cache.pop(cache_key, None)
             pending = self._query_inflight.get(cache_key)
@@ -224,6 +236,7 @@ class HybridRetriever:
                 leader = True
             else:
                 leader = False
+                self._query_stats["coalesced_waiters"] += 1
         if not leader:
             vector = pending.result()
             if vector is None:
@@ -231,6 +244,8 @@ class HybridRetriever:
                 return None
             return list(vector)
         try:
+            with self._query_cache_lock:
+                self._query_stats["encoder_calls"] += 1
             if self._embedder is None:
                 from benchmark.onnx_embed import OnnxBgeM3
                 self._embedder = OnnxBgeM3(
@@ -239,6 +254,7 @@ class HybridRetriever:
             if v is None or len(v) == 0:
                 self._local.vector_error = "empty_embedding"
                 with self._query_cache_lock:
+                    self._query_stats["encoder_failures"] += 1
                     self._query_inflight.pop(cache_key, None)
                     pending.set_result(None)
                 return None
@@ -255,6 +271,7 @@ class HybridRetriever:
         except Exception as error:
             self._local.vector_error = type(error).__name__
             with self._query_cache_lock:
+                self._query_stats["encoder_failures"] += 1
                 self._query_inflight.pop(cache_key, None)
                 pending.set_result(None)
             return None
