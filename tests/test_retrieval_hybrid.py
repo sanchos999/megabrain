@@ -81,7 +81,28 @@ def test_query_embedding_cache_normalizes_whitespace_before_inference():
     second = retriever._encode_query("  Find the decision   about memory\t")
 
     assert first == second == [0.25] * 1024
-    assert retriever._embedder.calls == [(["Find the decision about memory"], 512)]
+    assert retriever._embedder.calls == [(["Find the decision about memory"], 128)]
+
+
+def test_long_query_embedding_is_capped_but_full_text_is_given_to_encoder():
+    class FakeVector:
+        def tolist(self):
+            return [0.25] * 1024
+
+    class FakeEmbedder:
+        def __init__(self):
+            self.calls = []
+
+        def encode(self, texts, max_length):
+            self.calls.append((texts, max_length))
+            return [FakeVector()]
+
+    query = "decision context " * 100
+    retriever = HybridRetriever()
+    retriever._embedder = FakeEmbedder()
+
+    assert retriever._encode_query(query) == [0.25] * 1024
+    assert retriever._embedder.calls == [( [" ".join(query.split())], 128)]
 
 
 def test_simultaneous_identical_query_embeddings_are_single_flight():

@@ -26,6 +26,7 @@ DEFAULTS = {
     "retrieval_item_candidates": 40,
     "retrieval_query_cache_max": 256,
     "retrieval_query_cache_ttl_s": 300,
+    "retrieval_query_max_tokens": 128,
     "onnx_threads": 4,
     "retrieval_e5_fast_path": False,
     "retrieval_e5_min_similarity": 0.80,

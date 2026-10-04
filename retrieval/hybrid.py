@@ -250,7 +250,10 @@ class HybridRetriever:
                 from benchmark.onnx_embed import OnnxBgeM3
                 self._embedder = OnnxBgeM3(
                     threads=int(self.cfg.get("onnx_threads", 2)))
-            v = self._embedder.encode([normalized_query[:MAX_DOC_CHARS]], max_length=MAX_LEN)
+            query_max_tokens = max(
+                64, min(MAX_LEN, int(self.cfg.get("retrieval_query_max_tokens", 128))))
+            v = self._embedder.encode(
+                [normalized_query[:MAX_DOC_CHARS]], max_length=query_max_tokens)
             if v is None or len(v) == 0:
                 self._local.vector_error = "empty_embedding"
                 with self._query_cache_lock:

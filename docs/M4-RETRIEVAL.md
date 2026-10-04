@@ -280,6 +280,16 @@ only from 224 to 225, so running a second encoder per query is not justified.
 These source pairs still have uncontrolled lexical overlap and are not a
 human-labeled measure of general recall.
 
+To reduce the long-query encoder tail without trimming FTS input, only the
+semantic embedding is now capped at 128 tokens; the full normalized query
+continues to feed PostgreSQL FTS. On an exact-model paired replay of 229 linked
+source queries, full-length and 128-token embeddings had the same target ranks:
+225/229 top-5, 224/229 top-1, and four misses from top-50. For the four queries
+over 512 characters, embedding latency changed from 225 ms median/331 ms max to
+109 ms median/111 ms max. This is a small, memory-derived sample, so live
+post-deploy quality and latency checks remain required; the configurable cap is
+`retrieval_query_max_tokens` (64–512, default 128).
+
 ## Context Capsule integration
 
 Capsule не заменяется vector-результатами. Structured current state имеет
