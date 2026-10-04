@@ -214,7 +214,9 @@ query-encoder time and is a memory-derived proxy, not a general human-query
 quality result. After deployment, the same 60-query loopback API canary used
 44 exact-topic, 10 exact-key, and six hybrid-BGE routes; target top-1 remained
 60/60, with zero project leaks or HTTP errors. End-to-end p50/p95 was 2.03/29.89
-ms; the p95 includes semantic fallbacks and is not an SLA.
+ms on the first pass. The repeatable evaluator now includes this canary; its next
+run measured 1.90/28.45 ms with the same routing and recall. The p95 includes
+semantic fallbacks and neither measurement is an SLA.
 
 ## Context Capsule integration
 

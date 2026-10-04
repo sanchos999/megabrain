@@ -282,6 +282,58 @@ def _whitespace_cache_probe(records: list[dict], token: str) -> dict:
     }
 
 
+def _discussion_topic_probe(records: list[dict], token: str) -> dict:
+    """Canary exact-topic parsing on RU/EN discussion question shells."""
+    paths: dict[str, int] = {}
+    target_ranks: list[int | None] = []
+    project_leaks = vector_degraded = 0
+    times: list[float] = []
+    for record in records:
+        topic = record["fts_query"]
+        for query in (f"Что мы обсуждали по теме {topic}?",
+                      f"What did we discuss about {topic}?"):
+            payload = json.dumps({
+                "query": query, "mode": "WARM", "limit": 20,
+                "project_id": record["project_id"],
+            }).encode()
+            headers = {"Content-Type": "application/json"}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            request = urllib.request.Request(
+                "http://127.0.0.1:4300/v1/memory/search", data=payload,
+                headers=headers, method="POST",
+            )
+            started = time.perf_counter()
+            with urllib.request.urlopen(request, timeout=30) as response:
+                result = json.loads(response.read())
+            times.append((time.perf_counter() - started) * 1000)
+            path = str(result.get("retrieval_path", "unknown"))
+            paths[path] = paths.get(path, 0) + 1
+            vector_degraded += int(result.get("vector_degraded", True))
+            project_leaks += sum(1 for hit in result.get("results", [])
+                                 if hit.get("project_id") != record["project_id"])
+            target_ranks.append(next((rank for rank, hit in enumerate(
+                result.get("results", []), 1)
+                if hit.get("memory_item_id") == record["item_id"]), None))
+
+    ordered = sorted(times)
+    count = len(target_ranks)
+    return {
+        "queries": count,
+        "retrieval_paths": paths,
+        "target_top_1": sum(rank == 1 for rank in target_ranks),
+        "target_hit_at_5": round(sum(rank is not None and rank <= 5
+                                      for rank in target_ranks) / max(1, count), 4),
+        "target_hit_at_20": round(sum(rank is not None and rank <= 20
+                                       for rank in target_ranks) / max(1, count), 4),
+        "project_leaks": project_leaks,
+        "vector_degraded_queries": vector_degraded,
+        "http_p50_ms": round(statistics.median(ordered), 2) if ordered else None,
+        "http_p95_ms": round(ordered[min(count - 1, int(count * 0.95))], 2)
+        if ordered else None,
+    }
+
+
 def _e5_source_probe(records: list[dict], dsn: str, token: str) -> dict:
     encoded: list[list[float]] = []
     batch_ms: list[float] = []
@@ -394,6 +446,7 @@ def run() -> int:
         require_item_match=True)
     whitespace_cache_metrics = _whitespace_cache_probe(source_records, token)
     e5_source_metrics = _e5_source_probe(source_records, dsn, token)
+    discussion_topic_metrics = _discussion_topic_probe(records, token)
     result = {
         "evaluation": "generated questions from explicit current memories; proxy, not human-judged",
         "queries": len(records),
@@ -414,9 +467,14 @@ def run() -> int:
         },
         "whitespace_equivalent_cache_probe": whitespace_cache_metrics,
         "e5_source_message_probe": e5_source_metrics,
+        "discussion_topic_fast_path_canary": discussion_topic_metrics,
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    unsafe = metrics["project_leaks"] or metrics["vector_degraded_queries"]
+    unsafe = (
+        metrics["project_leaks"] or metrics["vector_degraded_queries"]
+        or discussion_topic_metrics["project_leaks"]
+        or discussion_topic_metrics["vector_degraded_queries"]
+    )
     return int(bool(unsafe))
 
 
