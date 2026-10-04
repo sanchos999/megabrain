@@ -82,6 +82,12 @@ def test_query_embedding_cache_normalizes_whitespace_before_inference():
 
     assert first == second == [0.25] * 1024
     assert retriever._embedder.calls == [(["Find the decision about memory"], 128)]
+    assert retriever.query_embedding_metrics() == {
+        "cache_hits": 1,
+        "encoder_calls": 1,
+        "coalesced_waiters": 0,
+        "encoder_failures": 0,
+    }
 
 
 def test_long_query_embedding_is_capped_but_full_text_is_given_to_encoder():
@@ -102,6 +108,30 @@ def test_long_query_embedding_is_capped_but_full_text_is_given_to_encoder():
     retriever._embedder = FakeEmbedder()
 
     assert retriever._encode_query(query) == [0.25] * 1024
+    assert retriever._embedder.calls == [( [" ".join(query.split())], 128)]
+
+
+def test_query_token_cap_does_not_truncate_full_text_search_input():
+    class FakeVector:
+        def tolist(self):
+            return [0.25] * 1024
+
+    class FakeEmbedder:
+        def __init__(self):
+            self.calls = []
+
+        def encode(self, texts, max_length):
+            self.calls.append((texts, max_length))
+            return [FakeVector()]
+
+    query = "full retrieval context " * 100
+    retriever = HybridRetriever()
+    retriever._embedder = FakeEmbedder()
+    cursor = _RecordingCursor()
+
+    retriever._run_legs(cursor, query, 5, False, "project-a", None, None)
+
+    assert cursor.calls[0][1]["q"] == query
     assert retriever._embedder.calls == [( [" ".join(query.split())], 128)]
 
 
@@ -179,6 +209,32 @@ def test_failed_single_flight_releases_waiters_and_allows_retry():
         "coalesced_waiters": workers - 1,
         "encoder_failures": 1,
     }
+
+
+def test_distinct_query_embeddings_remain_concurrent():
+    class FakeVector:
+        def tolist(self):
+            return [0.125] * 1024
+
+    class FakeEmbedder:
+        def __init__(self):
+            self.barrier = threading.Barrier(2)
+            self.calls = 0
+
+        def encode(self, texts, max_length):
+            self.calls += 1
+            self.barrier.wait(timeout=1)
+            return [FakeVector()]
+
+    retriever = HybridRetriever({"retrieval_query_cache_max": 0})
+    retriever._embedder = FakeEmbedder()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(retriever._encode_query, ("query alpha", "query beta")))
+
+    assert results == [[0.125] * 1024] * 2
+    assert retriever._embedder.calls == 2
+    assert retriever.query_embedding_metrics()["coalesced_waiters"] == 0
 
 
 def test_exact_item_key_detection_requires_one_explicit_identifier():
