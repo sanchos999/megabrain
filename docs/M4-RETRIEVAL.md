@@ -148,13 +148,22 @@ artifact; the worker is low-priority and bounded to 1.5 CPU cores / 1 GiB. A
 warmed 8-passage API batch took about 41 ms locally, including transport and
 JSON serialization; that is an observation, not an SLA.
 
-Production retrieval remains on BGE-M3: `retrieval_e5_fast_path` defaults to
-false. If explicitly enabled, E5 is restricted to project-scoped, current,
-high-confidence explicit memories for unambiguous WARM topics; it must clear
-both cosine >= 0.80 and top-1/top-2 margin >= 0.02. DEEP, historical, ambiguous,
-unscoped, low-confidence, or low-margin requests keep the existing BGE hybrid
-path. The flag stays off until a larger human-judged real-query set confirms
-quality; all synthetic numbers above are proxy evidence only.
+The code default remains BGE-M3 (`retrieval_e5_fast_path=false`). A tracked
+systemd drop-in, `deploy/systemd/megabrain.service.d/90-e5-fast-path.conf`, now
+enables only the guarded E5 fallback in production. It is restricted to
+project-scoped, current, high-confidence explicit memories for unambiguous WARM
+topics and must clear both cosine >= 0.80 and top-1/top-2 margin >= 0.02. DEEP,
+historical, ambiguous, unscoped, low-confidence, and low-margin requests retain
+the existing BGE hybrid path. The flag can be rolled back to `0` and the API
+restarted without touching either index.
+
+Post-index live API canary: 100 memory-derived proxy questions produced 54 E5
+routes and 46 unchanged BGE routes; the intended item appeared in top-5 on all
+54 accepted E5 cases, with zero HTTP errors. On the matching offline subset,
+server p50 was 5.79 ms for E5 vs 26.17 ms for BGE. Across the mixed live HTTP
+sample, p50/p95 was 7.96/39.76 ms. This is a narrow synthetic canary, not a
+human-judged real-query benchmark or an SLA; broader relevance validation is
+still needed before widening the E5 route.
 
 ## Context Capsule integration
 
