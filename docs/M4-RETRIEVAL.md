@@ -211,7 +211,10 @@ the target was top-1 in all 60 with zero project leaks. Against the prior parser
 which routed 50/60 through hybrid BGE, the in-process DB-path p50 was 0.73 ms
 versus 4.59 ms when both used the same precomputed BGE vectors. This excludes
 query-encoder time and is a memory-derived proxy, not a general human-query
-quality result.
+quality result. After deployment, the same 60-query loopback API canary used
+44 exact-topic, 10 exact-key, and six hybrid-BGE routes; target top-1 remained
+60/60, with zero project leaks or HTTP errors. End-to-end p50/p95 was 2.03/29.89
+ms; the p95 includes semantic fallbacks and is not an SLA.
 
 ## Context Capsule integration
 
