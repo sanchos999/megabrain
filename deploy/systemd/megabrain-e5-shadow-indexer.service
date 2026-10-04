@@ -6,7 +6,7 @@ Wants=megabrain.service
 [Service]
 Type=simple
 WorkingDirectory=%h/megabrain
-EnvironmentFile=%h/.config/megabrain/megabrain.env
+EnvironmentFile=%h/.config/megabrain/production.env
 Environment=MB_BASE_URL=http://127.0.0.1:4300
 Environment=MB_API_TOKEN_FILE=%h/.config/megabrain/token
 Environment=MB_E5_BATCH=4
