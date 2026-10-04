@@ -124,6 +124,26 @@ class HybridRetriever:
           and mie.embedding <=> %(vec)s::vector < 0.98
     """
 
+    E5_ITEM_VEC_SQL = f"""
+        select 'item:' || mi.item_id as key,
+               coalesce(mi.source_event_ids[1], 'memory_item:' || mi.item_id) as event_id,
+               mi.item_id, null::text as session_id, mi.project_id,
+               'MEMORY_ITEM' as event_type, mi.kind as source,
+               mi.valid_from as created_at, {ITEM_TEXT} as text,
+               mi.source_event_ids, mi.confidence, mi.valid_from, mi.valid_to,
+               (mi.valid_to is not null) as superseded,
+               1 - (mie.embedding <=> %(vec)s::vector) as similarity
+        from memory_item_embeddings_e5 mie
+        join memory_items mi on mi.item_id = mie.item_id
+        where mie.model_version = %(mv)s and mie.dimension = 384
+          and mi.valid_to is null and mi.extractor_type = 'EXPLICIT'
+          and mi.confidence >= 0.9
+          and mi.kind in ('DECISION', 'CONSTRAINT', 'TASK')
+          and coalesce(mi.content->>'status', '') not in ('REJECTED', 'SUPERSEDED')
+          and coalesce(mi.content->>'content_status', '') <> 'REJECTED_EMPTY'
+          and mie.embedding <=> %(vec)s::vector < 0.98
+    """
+
     ITEM_KEY_SQL = f"""
         select 'item:' || mi.item_id as key,
                coalesce(mi.source_event_ids[1], 'memory_item:' || mi.item_id) as event_id,
@@ -313,6 +333,45 @@ class HybridRetriever:
             event_vec_rows, item_vec_rows, vec_ok = [], [], False
         return event_fts_rows, item_fts_rows, event_vec_rows, item_vec_rows, vec_ok
 
+    def _confident_e5_items(self, cur, query: str, limit: int,
+                            project_id: str, session_id: str | None) -> list[Row] | None:
+        """Return E5 item hits only above a conservative score+margin gate."""
+        try:
+            from benchmark.onnx_e5_embed import EMBEDDING_MODEL_VERSION as e5_version
+            from benchmark.onnx_e5_embed import encode as encode_e5
+
+            query_vector = encode_e5(
+                [query], kind="query",
+                threads=int(self.cfg.get("e5_threads", 4)),
+            )[0]
+            item_extra, item_params = self._item_where(
+                False, project_id, session_id, None)
+            params = {
+                "mv": e5_version,
+                "vec": "[" + ",".join(f"{float(x):.6f}" for x in query_vector) + "]",
+                "lim": max(limit * 3, 20),
+                **item_params,
+            }
+            cur.execute(
+                self.E5_ITEM_VEC_SQL + item_extra
+                + " order by mie.embedding <=> %(vec)s::vector limit %(lim)s",
+                params,
+            )
+            rows = self._fetch(cur)
+        except psycopg.OperationalError:
+            raise
+        except (psycopg.Error, OSError, RuntimeError, ValueError, ImportError) as error:
+            self._local.e5_error = type(error).__name__
+            return None
+
+        if len(rows) < 2:
+            return None
+        best, second = float(rows[0][14]), float(rows[1][14])
+        if (best < float(self.cfg.get("retrieval_e5_min_similarity", 0.80))
+                or best - second < float(self.cfg.get("retrieval_e5_min_margin", 0.02))):
+            return None
+        return [row[:14] for row in rows[:max(limit * 3, 20)]]
+
     @staticmethod
     def _delimited_topic(query: str) -> str | None:
         suffix = re.search(r":\s+([^:\n?;]{4,120})[?!.]*\s*$", query or "")
@@ -403,6 +462,7 @@ class HybridRetriever:
         conn = self._connection()
         vector_skipped = False
         vector_skip_reason = None
+        retrieval_path = "hybrid_bge"
         try:
             with conn.cursor() as cur:
                 key = self._exact_item_key(query)
@@ -446,10 +506,24 @@ class HybridRetriever:
                     vector_skipped = True
                     vector_skip_reason = vector_skip_reason or "exact_item_key"
                     rrf = self._rrf(item_fts, [], max(limit * 3, 20))
+                    retrieval_path = vector_skip_reason
                 else:
-                    event_fts, item_fts, event_vec, item_vec, vec_ok = self._run_legs(
-                        cur, query, top_n if deep else limit, deep,
-                        project_id, session_id, at_time)
+                    e5_rows = None
+                    explicit_topic = bool(key or topic)
+                    history_request = history_request or deep
+                    if (self.cfg.get("retrieval_e5_fast_path", False)
+                            and explicit_topic and project_id and not history_request
+                            and at_time is None):
+                        e5_rows = self._confident_e5_items(
+                            cur, query, limit, project_id, session_id)
+                    if e5_rows:
+                        event_fts, item_fts, event_vec = [], [], []
+                        item_vec, vec_ok = e5_rows, True
+                        retrieval_path = "e5_confident_semantic"
+                    else:
+                        event_fts, item_fts, event_vec, item_vec, vec_ok = self._run_legs(
+                            cur, query, top_n if deep else limit, deep,
+                            project_id, session_id, at_time)
                     rrf = self._rrf(event_fts + item_fts, event_vec + item_vec,
                                     max(limit * 3, 20))
                 event_ids = [r[1] for r, _, _ in rrf if r[2] is None and r[1]]
@@ -506,6 +580,7 @@ class HybridRetriever:
             "vector_degraded": not vec_ok and not vector_skipped,
             "vector_error": None if vector_skipped else getattr(self._local, "vector_error", None),
             "vector_skipped": vector_skip_reason,
+            "retrieval_path": retrieval_path,
             "count": len(results),
             "results": results,
             "latency_ms": round((time.perf_counter() - t0) * 1000, 2),

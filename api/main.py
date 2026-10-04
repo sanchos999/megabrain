@@ -10,7 +10,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from ipaddress import ip_address
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Security
 from fastapi.concurrency import run_in_threadpool
@@ -390,6 +390,11 @@ class EmbeddingBatchIn(BaseModel):
     texts: list[str] = Field(min_length=1, max_length=8)
 
 
+class E5EmbeddingBatchIn(BaseModel):
+    texts: list[str] = Field(min_length=1, max_length=8)
+    kind: Literal["query", "passage"]
+
+
 @app.post("/v1/internal/embeddings", dependencies=[Depends(require_auth)])
 async def internal_embeddings(body: EmbeddingBatchIn, request: Request):
     """Loopback-only worker endpoint reusing the API's already-loaded ONNX session."""
@@ -407,6 +412,38 @@ async def internal_embeddings(body: EmbeddingBatchIn, request: Request):
 
     vectors = await run_in_threadpool(_get_retriever().encode_documents, body.texts)
     return {"model_version": EMBEDDING_MODEL_VERSION, "vectors": vectors}
+
+
+@app.post("/v1/internal/e5-embeddings", dependencies=[Depends(require_auth)])
+async def internal_e5_embeddings(body: E5EmbeddingBatchIn, request: Request):
+    """Loopback-only experimental E5 encoder for its isolated 384d side index."""
+    client = request.client
+    try:
+        is_loopback = bool(client and ip_address(client.host).is_loopback)
+    except ValueError:
+        is_loopback = False
+    if not is_loopback:
+        raise HTTPException(status_code=403, detail="loopback clients only")
+    if any(not text.strip() or len(text) > 4000 for text in body.texts):
+        raise HTTPException(status_code=422, detail="texts must be non-empty and at most 4000 chars")
+
+    from benchmark.onnx_e5_embed import (
+        EMBEDDING_DIM,
+        EMBEDDING_MODEL_VERSION,
+        encode,
+    )
+    try:
+        vectors = await run_in_threadpool(
+            encode, body.texts, kind=body.kind,
+            threads=int(STATE["cfg"].get("e5_threads", 4)),
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=503, detail="experimental E5 model is not installed") from error
+    return {
+        "model_version": EMBEDDING_MODEL_VERSION,
+        "dimension": EMBEDDING_DIM,
+        "vectors": vectors,
+    }
 
 
 @app.post("/v1/memory/search", dependencies=[Depends(require_auth)])
@@ -448,6 +485,9 @@ async def memory_search(s: MemorySearchIn):
     else:
         STATE["telemetry"].inc(
             f"retrieval_vector_skipped_{res.get('vector_skipped', 'exact_match')}")
+    path = res.get("retrieval_path", "hybrid_bge")
+    if path in {"hybrid_bge", "e5_confident_semantic"}:
+        STATE["telemetry"].inc(f"retrieval_path_{path}")
     STATE["telemetry"].observe("memory_search_ms", res["latency_ms"])
     return res
 

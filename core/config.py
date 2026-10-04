@@ -27,6 +27,10 @@ DEFAULTS = {
     "retrieval_query_cache_max": 256,
     "retrieval_query_cache_ttl_s": 300,
     "onnx_threads": 4,
+    "retrieval_e5_fast_path": False,
+    "retrieval_e5_min_similarity": 0.80,
+    "retrieval_e5_min_margin": 0.02,
+    "e5_threads": 4,
 }
 
 
@@ -56,6 +60,8 @@ def load_config() -> dict:
                 cfg[key] = int(val)
             elif isinstance(cur, bool):
                 cfg[key] = val.lower() in ("1", "true", "yes")
+            elif isinstance(cur, float):
+                cfg[key] = float(val)
             else:
                 cfg[key] = val
     # token file (systemd EnvironmentFile style) wins

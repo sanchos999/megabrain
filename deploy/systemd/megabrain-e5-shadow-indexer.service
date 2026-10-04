@@ -1,0 +1,27 @@
+[Unit]
+Description=MegaBrain low-priority E5 shadow memory indexer
+After=megabrain.service
+Wants=megabrain.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/megabrain
+EnvironmentFile=%h/.config/megabrain/megabrain.env
+Environment=MB_BASE_URL=http://127.0.0.1:4300
+Environment=MB_API_TOKEN_FILE=%h/.config/megabrain/token
+Environment=MB_E5_BATCH=4
+Environment=MB_E5_SLEEP_S=0.25
+Environment=MB_E5_IDLE_SLEEP_S=60
+ExecStart=%h/megabrain/.venv/bin/python %h/megabrain/scripts/e5_embedding_worker.py
+Restart=on-failure
+RestartSec=30
+Nice=18
+CPUWeight=10
+CPUQuota=150%
+MemoryHigh=768M
+MemoryMax=1G
+TasksMax=32
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target
