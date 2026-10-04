@@ -63,8 +63,9 @@ class FakeRepo:
         for i, r in enumerate(self.runs):
             if r[0] == project and r[1] == digest: self.runs[i] = (project, digest, status, values); return
         self.runs.append((project, digest, status, values))
-    def success(self, project, events, *, commit=True):
+    def success(self, project, events, *, commit=True, cooldown_s=None):
         self.success_batches.append((project, list(events)))
+        self.projects[project]["success_cooldown_s"] = cooldown_s
         self.projects[project]["events"] = self.projects[project]["events"][len(events):]
         self.projects[project]["first"] = datetime.now(UTC)
         self.projects[project]["next"] = datetime.now(UTC) + timedelta(seconds=900)
@@ -212,6 +213,7 @@ def test_noise_only_window_advances_watermark_without_llm():
     assert result["status"] == "no_llm"
     assert r.calls == 0
     assert [e["event_id"] for e in r.success_batches[0][1]] == ["evt_A_1", "evt_A_2"]
+    assert r.projects["A"]["success_cooldown_s"] == 0
     assert r.projects["A"]["events"] == []
 
 

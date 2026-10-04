@@ -402,8 +402,10 @@ class PostgresSchedulerRepository:
         if commit:
             self.pg.conn.commit()
 
-    def success(self, project_id: str, events: list[dict], *, commit: bool = True) -> None:
+    def success(self, project_id: str, events: list[dict], *, commit: bool = True,
+                cooldown_s: int | None = None) -> None:
         last_event_id = events[-1]["event_id"] if events else None
+        cooldown = self.settings.cooldown_s if cooldown_s is None else max(0, cooldown_s)
         with self.pg.conn.cursor() as cur:
             cur.execute("""UPDATE consolidation_projects c SET
                 last_consolidated_event_id=COALESCE(%s,last_consolidated_event_id),
@@ -423,7 +425,7 @@ class PostgresSchedulerRepository:
                 last_success_at=now(),next_eligible_at=now()+(%s || ' seconds')::interval,updated_at=now()
                 WHERE c.project_id=%s""",
                 (last_event_id, list(MEANINGFUL), list(NOISE), last_event_id,
-                 last_event_id, str(self.settings.cooldown_s), project_id))
+                 last_event_id, str(cooldown), project_id))
         if commit:
             self.pg.conn.commit()
 
@@ -581,7 +583,10 @@ class ConsolidationWorker:
         if not events:
             # No new candidate memory: advance across the entire inspected
             # window (including filtered noise and already-explicit sources).
-            self.repository.success(project, scanned)
+            # This path is non-billable and may be draining a stale noise-only
+            # backlog. Do not impose the normal post-LLM cooldown between
+            # bounded scan windows; the worker's poll interval still limits it.
+            self.repository.success(project, scanned, cooldown_s=0)
             self.heartbeat.update(state="RUNNING", success=True, reset_errors=False, processed_items=len(scanned))
             return {"status": "no_llm", "llm_calls": 0, "advanced": len(scanned)}
         events = events[:self.settings.max_batch_events]

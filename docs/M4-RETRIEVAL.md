@@ -189,6 +189,20 @@ to use the original query. Its unit regression test confirms one encoder call
 for whitespace-equivalent inputs; request-level latency is DB-dominated, so no
 material overall latency gain was measurable in the live paired probe.
 
+### Post-rollout spot check (2026-10-04)
+
+A smaller read-only repeat (10 explicit memories per kind, plus 12 eligible
+source-message pairs) returned 30/30 proxy targets at top-1 for generated
+questions; 29/30 used the exact-topic path. Server p50/p95 was 0.80/3.04 ms,
+with zero project leaks or vector errors. Original source wording found its
+linked canonical item in top-5 for 11/12 cases (10 semantic fallbacks had a
+62.71 ms median); one >512-character query took 306.86 ms. Neither 256/512-char
+truncation nor head/tail text selection improved target recall, so the full
+query remains enabled. The E5 probe accepted all 12 cases but also hit only
+11/12, which is too small and not better than BGE to justify widening that
+route. These are small, memory-derived proxy samples—not human labels, an SLA,
+or evidence that arbitrary questions are recalled perfectly.
+
 ## Context Capsule integration
 
 Capsule не заменяется vector-результатами. Structured current state имеет
