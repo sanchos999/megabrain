@@ -303,6 +303,12 @@ counters successful. A post-prewarm repeat over 227 source queries remained
 queries measured 256 ms median/296 ms p95. No multi-second outlier recurred in
 that repeat, though four observations are too few for an SLA claim.
 
+A paired read-only source-query replay compared the guarded E5 route with
+BGE-only for 227 linked facts. BGE-only returned 223 targets in top-5 (222
+top-1); enabling the confidence-gated E5 route returned 224 top-5 (223 top-1),
+and the E5 route was selected once. This small proxy gain supports retaining
+the guard, not broadening it; the comparison is not human-labeled.
+
 ## Context Capsule integration
 
 Capsule не заменяется vector-результатами. Structured current state имеет
