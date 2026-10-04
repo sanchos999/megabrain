@@ -23,6 +23,18 @@ FUTURE_KINDS = {"EPISODE", "FACT", "ENTITY", "RELATION", "PROCEDURE",
 # so current_memory()/capsule surface them.
 EXPERIENCE_KINDS = {"PROCEDURE", "FAILURE_PATTERN", "EXPERIENCE",
                     "REJECTED_APPROACH"}
+CONSOLIDATION_EVENT_TYPES = frozenset({
+    "USER_MESSAGE", "ASSISTANT_MESSAGE", "ERROR", "TEST_RESULT", "FILE_WRITE", "SHELL_RESULT",
+})
+
+
+def should_enqueue_consolidation(event_type: str, payload: dict,
+                                metadata: dict | None = None) -> bool:
+    """Only enqueue prose the consolidation prefilter could actually use."""
+    if event_type not in CONSOLIDATION_EVENT_TYPES or (metadata or {}).get("technical_echo"):
+        return False
+    text = str(payload.get("text") or payload.get("content") or "").strip()
+    return len(text) >= 12
 ALL_KINDS = KINDS | EXPERIENCE_KINDS
 
 
@@ -200,23 +212,21 @@ class Postgres:
         if project_id:
             # Mark only meaningful prose/operational events for asynchronous
             # consolidation. Structured explicit events are already derived.
-            if et in {"USER_MESSAGE", "ASSISTANT_MESSAGE", "ERROR", "TEST_RESULT", "FILE_WRITE", "SHELL_RESULT"}:
-                payload_text = str(payload.get("text") or payload.get("content") or "").strip() if isinstance(payload, dict) else ""
-                if len(payload_text) >= 12:
-                    cur.execute(
-                        """INSERT INTO consolidation_projects
-                           (project_id, first_dirty_at, last_dirty_at, pending_event_count, next_eligible_at)
-                           VALUES (%s, now(), now(), 1, now() + interval '15 minutes')
-                           ON CONFLICT (project_id) DO UPDATE SET
-                             first_dirty_at=CASE
-                               WHEN consolidation_projects.pending_event_count=0 THEN now()
-                               ELSE consolidation_projects.first_dirty_at END,
-                             last_dirty_at=now(),
-                             pending_event_count=consolidation_projects.pending_event_count + 1,
-                             next_eligible_at=now() + interval '15 minutes',
-                             updated_at=now()""",
-                        (project_id,),
-                    )
+            if should_enqueue_consolidation(et, payload, ev.get("metadata")):
+                cur.execute(
+                    """INSERT INTO consolidation_projects
+                       (project_id, first_dirty_at, last_dirty_at, pending_event_count, next_eligible_at)
+                       VALUES (%s, now(), now(), 1, now() + interval '15 minutes')
+                       ON CONFLICT (project_id) DO UPDATE SET
+                         first_dirty_at=CASE
+                           WHEN consolidation_projects.pending_event_count=0 THEN now()
+                           ELSE consolidation_projects.first_dirty_at END,
+                         last_dirty_at=now(),
+                         pending_event_count=consolidation_projects.pending_event_count + 1,
+                         next_eligible_at=now() + interval '15 minutes',
+                         updated_at=now()""",
+                    (project_id,),
+                )
             return self._bump_revision(cur, project_id, ev["event_id"])
         return None
 

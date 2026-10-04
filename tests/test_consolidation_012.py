@@ -12,6 +12,7 @@ from consolidation.worker import (
     importance_signal,
     prefilter,
 )
+from storage.pg import should_enqueue_consolidation
 
 
 class FakePG:
@@ -215,6 +216,21 @@ def test_noise_only_window_advances_watermark_without_llm():
     assert [e["event_id"] for e in r.success_batches[0][1]] == ["evt_A_1", "evt_A_2"]
     assert r.projects["A"]["success_cooldown_s"] == 0
     assert r.projects["A"]["events"] == []
+
+
+def test_technical_echo_never_enters_consolidation_queue():
+    assert not should_enqueue_consolidation(
+        "USER_MESSAGE", {"text": "A sufficiently long technical echo"},
+        {"technical_echo": True},
+    )
+    assert not should_enqueue_consolidation(
+        "USER_MESSAGE", {"text": "A sufficiently long technical echo"},
+        {"technical_echo": "true"},
+    )
+    assert should_enqueue_consolidation(
+        "USER_MESSAGE", {"text": "A sufficiently long real user message"},
+        {"technical_echo": False},
+    )
 
 
 def test_scheduler_fetches_bounded_raw_events_before_python_prefilter():
