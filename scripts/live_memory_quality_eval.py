@@ -13,6 +13,8 @@ import json
 import os
 import statistics
 import sys
+import time
+import urllib.request
 from pathlib import Path
 
 import psycopg
@@ -75,17 +77,19 @@ def _sample(dsn: str, per_kind: int) -> list[dict]:
                     "kind": item_kind,
                     "source_ids": set(source_ids or []),
                     "confidence": float(confidence),
+                    "fts_query": topic[:220],
                     "question": question,
                 })
     return selected
 
 
-def _evaluate(retriever: HybridRetriever, records: list[dict]) -> dict:
+def _evaluate(retriever: HybridRetriever, records: list[dict], *, fts_key_only: bool = False) -> dict:
     ranks: dict[str, list[int]] = {kind: [] for kind in QUESTIONS}
     latencies: list[float] = []
     project_leaks = vector_degraded = 0
     for record in records:
-        result = retriever.search(record["question"], mode="WARM", limit=50,
+        query = record["fts_query"] if fts_key_only else record["question"]
+        result = retriever.search(query, mode="WARM", limit=50,
                                   project_id=record["project_id"])
         latencies.append(float(result["latency_ms"]))
         vector_degraded += int(result.get("vector_degraded", True))
@@ -125,6 +129,74 @@ def _evaluate(retriever: HybridRetriever, records: list[dict]) -> dict:
     }
 
 
+def _evaluate_api(records: list[dict], token: str) -> dict:
+    times: list[float] = []
+    server_times: list[float] = []
+    fast_http: list[float] = []
+    full_http: list[float] = []
+    fast_server: list[float] = []
+    full_server: list[float] = []
+    ranks: list[int] = []
+    skipped = degraded = project_leaks = 0
+    for index, record in enumerate(records, 1):
+        # Trailing whitespace is tokenizer-equivalent but defeats the exact
+        # query-vector cache, so semantic fallback timings remain cache-cold.
+        query = record["question"] + " " * index
+        payload = json.dumps({
+            "query": query, "mode": "WARM", "limit": 50,
+            "project_id": record["project_id"],
+        }).encode()
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(
+            "http://127.0.0.1:4300/v1/memory/search", data=payload,
+            headers=headers, method="POST",
+        )
+        started = time.perf_counter()
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = json.loads(response.read())
+        times.append((time.perf_counter() - started) * 1000)
+        server_time = float(result.get("latency_ms", 0))
+        server_times.append(server_time)
+        if result.get("vector_skipped") == "exact_item_key":
+            fast_http.append(times[-1])
+            fast_server.append(server_time)
+            skipped += 1
+        else:
+            full_http.append(times[-1])
+            full_server.append(server_time)
+        degraded += int(result.get("vector_degraded", True))
+        project_leaks += sum(1 for hit in result.get("results", [])
+                             if hit.get("project_id") != record["project_id"])
+        for rank, hit in enumerate(result.get("results", []), 1):
+            source_match = bool(record["source_ids"] & set(hit.get("source_event_ids") or []))
+            if hit.get("memory_item_id") == record["item_id"] or source_match:
+                ranks.append(rank)
+                break
+
+    sorted_times = sorted(times)
+    sorted_server = sorted(server_times)
+    def p50(values: list[float]) -> float | None:
+        return round(statistics.median(values), 2) if values else None
+
+    return {
+        "hit_at_5": round(sum(rank <= 5 for rank in ranks) / len(records), 4),
+        "top_1": sum(rank == 1 for rank in ranks),
+        "vector_skipped_exact_key": skipped,
+        "vector_degraded_queries": degraded,
+        "project_leaks": project_leaks,
+        "http_p50_ms": round(statistics.median(sorted_times), 2),
+        "http_p95_ms": round(sorted_times[min(len(records) - 1, int(len(records) * 0.95))], 2),
+        "server_p50_ms": round(statistics.median(sorted_server), 2),
+        "server_p95_ms": round(sorted_server[min(len(records) - 1, int(len(records) * 0.95))], 2),
+        "fast_path_http_p50_ms": p50(fast_http),
+        "semantic_fallback_http_p50_ms": p50(full_http),
+        "fast_path_server_p50_ms": p50(fast_server),
+        "semantic_fallback_server_p50_ms": p50(full_server),
+    }
+
+
 def run() -> int:
     dsn = _read_only_dsn()
     per_kind = min(200, max(10, int(os.environ.get("MEGABRAIN_EVAL_PER_KIND", "40"))))
@@ -140,15 +212,23 @@ def run() -> int:
     _, vectors = _embed_many(questions, embed_url, token)
     vector_by_question = dict(zip(questions, vectors, strict=True))
     retriever = HybridRetriever({"postgres_dsn": dsn, "retrieval_query_cache_max": 0})
-    retriever._encode_query = lambda question: vector_by_question[question]
     try:
+        retriever._encode_query = lambda _question: None
+        fts_key_only_metrics = _evaluate(retriever, records, fts_key_only=True)
+        retriever._encode_query = lambda _question: None
+        fts_only_metrics = _evaluate(retriever, records)
+        retriever._encode_query = lambda question: vector_by_question[question]
         metrics = _evaluate(retriever, records)
     finally:
         retriever._drop_connection()
+    api_metrics = _evaluate_api(records, token)
     result = {
         "evaluation": "generated questions from explicit current memories; proxy, not human-judged",
         "queries": len(records),
+        "fts_key_only_diagnostic": fts_key_only_metrics,
+        "natural_query_fts_only_diagnostic": fts_only_metrics,
         "metrics": metrics,
+        "production_api_metrics": api_metrics,
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     unsafe = metrics["project_leaks"] or metrics["vector_degraded_queries"]

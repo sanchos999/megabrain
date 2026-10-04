@@ -443,8 +443,10 @@ async def memory_search(s: MemorySearchIn):
         at_time=s.at_time)
     if res.get("vector_degraded"):
         STATE["telemetry"].inc("retrieval_vector_degraded")
-    else:
+    elif res.get("vector_leg"):
         STATE["telemetry"].inc("retrieval_vector_ok")
+    else:
+        STATE["telemetry"].inc("retrieval_vector_skipped_exact_key")
     STATE["telemetry"].observe("memory_search_ms", res["latency_ms"])
     return res
 

@@ -7,6 +7,7 @@ weighted reciprocal rank, then checked against temporal validity.
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -121,6 +122,22 @@ class HybridRetriever:
         join memory_items mi on mi.item_id = mie.item_id
         where mie.model_version = %(mv)s and mie.dimension = %(dim)s
           and mie.embedding <=> %(vec)s::vector < 0.98
+    """
+
+    ITEM_KEY_SQL = f"""
+        select 'item:' || mi.item_id as key,
+               coalesce(mi.source_event_ids[1], 'memory_item:' || mi.item_id) as event_id,
+               mi.item_id, null::text as session_id, mi.project_id,
+               'MEMORY_ITEM' as event_type, mi.kind as source,
+               mi.valid_from as created_at, {ITEM_TEXT} as text,
+               mi.source_event_ids, mi.confidence, mi.valid_from, mi.valid_to,
+               (mi.valid_to is not null) as superseded
+        from memory_items mi
+        where lower(mi.content->>'item_key') = lower(%(item_key)s)
+          and mi.valid_to is null and mi.confidence >= 0.9
+          and mi.extractor_type = 'EXPLICIT'
+          and coalesce(mi.content->>'status', '') not in ('REJECTED', 'SUPERSEDED')
+          and coalesce(mi.content->>'content_status', '') <> 'REJECTED_EMPTY'
     """
 
     def __init__(self, cfg: dict | None = None):
@@ -296,6 +313,20 @@ class HybridRetriever:
             event_vec_rows, item_vec_rows, vec_ok = [], [], False
         return event_fts_rows, item_fts_rows, event_vec_rows, item_vec_rows, vec_ok
 
+    @staticmethod
+    def _exact_item_key(query: str) -> str | None:
+        """Return one explicit identifier or a delimited item-key phrase."""
+        suffix = re.search(r":\s+([^:\n?;]{4,120})[?!.]*\s*$", query or "")
+        if suffix:
+            candidate = " ".join(suffix.group(1).strip(" `\"'()[]{}").split())
+            if candidate:
+                return candidate
+        tokens = re.findall(r"[A-Za-zА-Яа-я][A-Za-zА-Яа-я0-9_.:/-]*", query or "")
+        keys = {token.strip(".:/-") for token in tokens
+                if len(token.strip(".:/-")) >= 4
+                and ("_" in token or any(char.isdigit() for char in token))}
+        return next(iter(keys)) if len(keys) == 1 else None
+
     # --- temporal validation --------------------------------------------
 
     def _temporal_flags(self, cur, event_ids: list[str]) -> dict[str, dict]:
@@ -331,13 +362,33 @@ class HybridRetriever:
         deep = mode == "DEEP"
         top_n = limit * 3 if not deep else max(limit * 5, 50)
         conn = self._connection()
+        vector_skipped = False
         try:
             with conn.cursor() as cur:
-                event_fts, item_fts, event_vec, item_vec, vec_ok = self._run_legs(
-                    cur, query, top_n if deep else limit, deep,
-                    project_id, session_id, at_time)
-                rrf = self._rrf(event_fts + item_fts, event_vec + item_vec,
-                                max(limit * 3, 20))
+                key = self._exact_item_key(query)
+                history_request = any(marker in query.lower() for marker in (
+                    "раньше", "предыдущ", "истори", "до этого", "previous", "earlier", "history", "before",
+                ))
+                exact_rows = []
+                if key and not deep and at_time is None and not history_request:
+                    item_extra, item_params = self._item_where(False, project_id, session_id, None)
+                    cur.execute(
+                        self.ITEM_KEY_SQL + item_extra
+                        + " order by mi.confidence desc, mi.valid_from desc limit %(lim)s",
+                        {"item_key": key, "lim": max(limit * 3, 20), **item_params},
+                    )
+                    exact_rows = self._fetch(cur)
+                if exact_rows:
+                    event_fts, item_fts = [], exact_rows
+                    event_vec, item_vec, vec_ok = [], [], False
+                    vector_skipped = True
+                    rrf = self._rrf(item_fts, [], max(limit * 3, 20))
+                else:
+                    event_fts, item_fts, event_vec, item_vec, vec_ok = self._run_legs(
+                        cur, query, top_n if deep else limit, deep,
+                        project_id, session_id, at_time)
+                    rrf = self._rrf(event_fts + item_fts, event_vec + item_vec,
+                                    max(limit * 3, 20))
                 event_ids = [r[1] for r, _, _ in rrf if r[2] is None and r[1]]
                 flags = self._temporal_flags(cur, event_ids)
         except psycopg.OperationalError:
@@ -389,8 +440,9 @@ class HybridRetriever:
         return {
             "query": query, "mode": mode, "limit": limit,
             "vector_leg": vec_ok,
-            "vector_degraded": not vec_ok,
-            "vector_error": getattr(self._local, "vector_error", None),
+            "vector_degraded": not vec_ok and not vector_skipped,
+            "vector_error": None if vector_skipped else getattr(self._local, "vector_error", None),
+            "vector_skipped": "exact_item_key" if vector_skipped else None,
             "count": len(results),
             "results": results,
             "latency_ms": round((time.perf_counter() - t0) * 1000, 2),

@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from retrieval.hybrid import HybridRetriever
 from scripts.embedding_worker import _vector_values, fetch_item_batch
 
@@ -54,3 +56,97 @@ def test_memory_item_key_is_in_vector_search_text_and_worker_embedding_text():
 
 def test_embedding_worker_accepts_ndarray_and_json_vector_rows():
     assert _vector_values([0.25, 0.5]) == [0.25, 0.5]
+
+
+def test_exact_item_key_detection_requires_one_explicit_identifier():
+    assert HybridRetriever._exact_item_key("Какие ограничения для vector_backend?") == "vector_backend"
+    assert HybridRetriever._exact_item_key("Какие ограничения для темы: память консолидации?") == "память консолидации"
+    assert HybridRetriever._exact_item_key("vector_backend vs API_KEY") is None
+    assert HybridRetriever._exact_item_key("what changed in version 2026?") is None
+
+
+def test_exact_current_item_key_skips_onnx_but_keeps_provenance():
+    row = (
+        "item:item-1", "event-1", "item-1", None, "project-1", "MEMORY_ITEM",
+        "CONSTRAINT", datetime.now(UTC), "vector_backend constraint",
+        ["event-1"], 0.99, datetime.now(UTC), None, False,
+    )
+
+    class Cursor:
+        def __init__(self):
+            self.calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+
+        def fetchall(self):
+            return [row]
+
+    class Connection:
+        def __init__(self):
+            self.cursor_value = Cursor()
+
+        def cursor(self):
+            return self.cursor_value
+
+    retriever = HybridRetriever({"retrieval_query_cache_max": 0})
+    conn = Connection()
+    retriever._connection = lambda: conn
+    retriever._encode_query = lambda _query: (_ for _ in ()).throw(AssertionError("ONNX should be skipped"))
+
+    result = retriever.search(
+        "Какие ограничения соблюдать для ключа: vector_backend?", mode="WARM",
+        limit=5, project_id="project-1",
+    )
+
+    assert len(conn.cursor_value.calls) == 1
+    assert conn.cursor_value.calls[0][1]["item_key"] == "vector_backend"
+    assert result["vector_skipped"] == "exact_item_key"
+    assert result["vector_degraded"] is False
+    assert result["results"][0]["source_event_ids"] == ["event-1"]
+
+
+def test_unmatched_explicit_key_falls_back_to_semantic_hybrid_search():
+    class EmptyCursor:
+        def __init__(self):
+            self.calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+
+        def fetchall(self):
+            return []
+
+    class Connection:
+        def __init__(self):
+            self.cursor_value = EmptyCursor()
+
+        def cursor(self):
+            return self.cursor_value
+
+    retriever = HybridRetriever({"retrieval_query_cache_max": 0})
+    conn = Connection()
+    retriever._connection = lambda: conn
+    retriever._encode_query = lambda _query: [0.0] * 1024
+    query = "Что настроено для отсутствующего ключа: missing_key_998?"
+
+    result = retriever.search(query, mode="WARM", limit=5)
+
+    calls = conn.cursor_value.calls
+    assert calls[0][1]["item_key"] == "missing_key_998"
+    assert calls[1][1]["q"] == query
+    assert result["vector_leg"] is True
+    assert result["vector_skipped"] is None
+    assert result["vector_degraded"] is False
