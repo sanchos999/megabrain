@@ -290,6 +290,11 @@ class HybridRetriever:
             "project_id": project_id,
             **structural,
         }
+        if at_time:
+            # event_extra is appended to both the FTS and vector SQL. Keep the
+            # named parameter present for the vector leg as well; otherwise a
+            # historical query silently degrades to FTS-only on psycopg.
+            vparams["at"] = at_time
         try:
             cur.execute(self.VEC_SQL + event_extra +
                         " order by me.embedding <=> %(vec)s::vector limit %(lim)s", vparams)

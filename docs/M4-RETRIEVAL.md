@@ -91,3 +91,17 @@ SOURCES.
 - retrieval/hybrid.py — HybridRetriever + select_mode
 - api/main.py — POST /v1/memory/search
 - tests/test_m4.py — acceptance A-J (11/11 PASS)
+
+## Local retrieval quality evaluation
+
+Run `scripts/retrieval_quality_eval.py` with `MEGABRAIN_IT_DATABASE_URL` pointing
+to an isolated PostgreSQL database whose name ends in `_it`, `_it_<number>`,
+or `_test`. The script applies migrations, creates a synthetic corpus, embeds
+it through the loopback `/v1/internal/embeddings` endpoint (reusing the loaded
+API model), evaluates Recall@5/MRR/nDCG@5 and project isolation, then removes
+the seeded rows. It prints ranks and aggregate metrics only, never retrieved
+text. It refuses production-style database names and non-loopback embedding
+URLs. Optional authentication uses `MEGABRAIN_API_TOKEN_FILE`.
+
+This is a regression baseline, not a human-level benchmark. Add representative,
+judged real-world cases before using it to tune ranking weights.
