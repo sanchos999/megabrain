@@ -199,6 +199,14 @@ to use the original query. Its unit regression test confirms one encoder call
 for whitespace-equivalent inputs; request-level latency is DB-dominated, so no
 material overall latency gain was measurable in the live paired probe.
 
+Cold-cache concurrent requests for the same normalized query now share one
+in-flight BGE embedding; unrelated queries remain concurrent. A 12-thread
+regression test confirms one encoder invocation instead of twelve while
+returning the same vector to every caller. This reduces duplicate CPU work under
+request bursts without changing retrieval scores; production impact depends on
+how often identical cold queries overlap, which is not yet separately
+instrumented.
+
 ### Post-rollout spot check (2026-10-04)
 
 A smaller read-only repeat (10 explicit memories per kind, plus 12 eligible

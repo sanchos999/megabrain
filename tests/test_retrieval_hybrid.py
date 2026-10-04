@@ -1,3 +1,6 @@
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 from retrieval.hybrid import HybridRetriever
@@ -79,6 +82,37 @@ def test_query_embedding_cache_normalizes_whitespace_before_inference():
 
     assert first == second == [0.25] * 1024
     assert retriever._embedder.calls == [(["Find the decision about memory"], 512)]
+
+
+def test_simultaneous_identical_query_embeddings_are_single_flight():
+    class FakeVector:
+        def tolist(self):
+            return [0.5] * 1024
+
+    class FakeEmbedder:
+        def __init__(self):
+            self.calls = 0
+
+        def encode(self, texts, max_length):
+            self.calls += 1
+            time.sleep(0.05)
+            return [FakeVector()]
+
+    workers = 12
+    barrier = threading.Barrier(workers)
+    retriever = HybridRetriever({"retrieval_query_cache_max": 0})
+    retriever._embedder = FakeEmbedder()
+
+    def encode():
+        barrier.wait()
+        return retriever._encode_query("same cold query")
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(lambda _index: encode(), range(workers)))
+
+    assert results == [[0.5] * 1024] * workers
+    assert retriever._embedder.calls == 1
+    assert retriever._query_inflight == {}
 
 
 def test_exact_item_key_detection_requires_one_explicit_identifier():

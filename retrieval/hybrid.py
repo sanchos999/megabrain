@@ -11,6 +11,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import Future
 from typing import Any
 
 import psycopg
@@ -166,6 +167,7 @@ class HybridRetriever:
         self._local = threading.local()
         self._query_cache_lock = threading.Lock()
         self._query_cache: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()
+        self._query_inflight: dict[str, Future[list[float] | None]] = {}
         self._query_cache_max = max(0, int(self.cfg.get("retrieval_query_cache_max", 256)))
         self._query_cache_ttl = max(0.0, float(self.cfg.get("retrieval_query_cache_ttl_s", 300)))
 
@@ -215,6 +217,19 @@ class HybridRetriever:
                     self._query_cache.move_to_end(cache_key)
                     return list(vector)
                 self._query_cache.pop(cache_key, None)
+            pending = self._query_inflight.get(cache_key)
+            if pending is None:
+                pending = Future()
+                self._query_inflight[cache_key] = pending
+                leader = True
+            else:
+                leader = False
+        if not leader:
+            vector = pending.result()
+            if vector is None:
+                self._local.vector_error = "embedding_unavailable"
+                return None
+            return list(vector)
         try:
             if self._embedder is None:
                 from benchmark.onnx_embed import OnnxBgeM3
@@ -223,17 +238,25 @@ class HybridRetriever:
             v = self._embedder.encode([normalized_query[:MAX_DOC_CHARS]], max_length=MAX_LEN)
             if v is None or len(v) == 0:
                 self._local.vector_error = "empty_embedding"
+                with self._query_cache_lock:
+                    self._query_inflight.pop(cache_key, None)
+                    pending.set_result(None)
                 return None
             vector = v[0].tolist()
-            if self._query_cache_max:
-                with self._query_cache_lock:
+            with self._query_cache_lock:
+                if self._query_cache_max:
                     self._query_cache[cache_key] = (time.monotonic(), vector)
                     self._query_cache.move_to_end(cache_key)
                     while len(self._query_cache) > self._query_cache_max:
                         self._query_cache.popitem(last=False)
+                self._query_inflight.pop(cache_key, None)
+                pending.set_result(vector)
             return vector
         except Exception as error:
             self._local.vector_error = type(error).__name__
+            with self._query_cache_lock:
+                self._query_inflight.pop(cache_key, None)
+                pending.set_result(None)
             return None
 
     def encode_documents(self, texts: list[str]) -> list[list[float]]:
