@@ -122,7 +122,7 @@ occurred. Server latency was p50/p95 37.8/115.3 ms and HTTP latency was
 measures routing and latency only—not answer quality. Query text was neither
 printed nor persisted by the replay.
 
-### CPU embedding-model experiment (2026-10-04, not deployed)
+### CPU embedding-model experiment and shadow index (2026-10-04)
 
 On the Xeon Platinum 8260, the pinned official
 [multilingual-e5-small model](https://huggingface.co/intfloat/multilingual-e5-small)
@@ -138,8 +138,23 @@ set tested a confidence rule (cosine >=0.80 and top-1/top-2 margin >=0.02): it
 accepted 538/600 with no wrong top-1 in that synthetic set. However, on the 15
 archived WARM traces the rule accepted only two; both appeared in the current
 BGE top-10, one at top-1. These synthetic/limited trace results do not establish
-general semantic quality. E5 is therefore an experiment only; production remains
-on BGE-M3 until a broader judged trace set and shadow-index rollout validate it.
+general semantic quality. The E5 encoder and an additive 384d side index are now
+deployed for shadow indexing only; migration `016` and
+`megabrain-e5-shadow-indexer.service` leave the 1024d BGE-M3 vectors untouched.
+The current index covers 3,582/3,582 eligible current explicit
+DECISION/CONSTRAINT/TASK items; an empty/stale batch is checked continuously by
+the worker. The API's authenticated loopback encoder uses the pinned ONNX
+artifact; the worker is low-priority and bounded to 1.5 CPU cores / 1 GiB. A
+warmed 8-passage API batch took about 41 ms locally, including transport and
+JSON serialization; that is an observation, not an SLA.
+
+Production retrieval remains on BGE-M3: `retrieval_e5_fast_path` defaults to
+false. If explicitly enabled, E5 is restricted to project-scoped, current,
+high-confidence explicit memories for unambiguous WARM topics; it must clear
+both cosine >= 0.80 and top-1/top-2 margin >= 0.02. DEEP, historical, ambiguous,
+unscoped, low-confidence, or low-margin requests keep the existing BGE hybrid
+path. The flag stays off until a larger human-judged real-query set confirms
+quality; all synthetic numbers above are proxy evidence only.
 
 ## Context Capsule integration
 
