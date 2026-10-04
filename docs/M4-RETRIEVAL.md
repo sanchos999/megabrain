@@ -218,6 +218,17 @@ ms on the first pass. The repeatable evaluator now includes this canary; its nex
 run measured 1.90/28.45 ms with the same routing and recall. The p95 includes
 semantic fallbacks and neither measurement is an SLA.
 
+A larger repeat (20 records per kind) covered 60 explicit-memory questions, 22
+source-linked original messages, and 120 discussion-shell probes. The generated
+questions were 60/60 top-1; the discussion canary was 120/120 top-1 with 98
+exact-topic, 12 exact-key, and 10 hybrid-BGE routes (HTTP p50/p95 1.47/5.13 ms).
+Original source messages linked to their canonical item in top-5 for 21/22;
+there were no project leaks or vector failures. One >512-character source query
+took 342.61 ms. E5 accepted 22/22 but also hit 21/22, matching BGE on this small
+sample, so the guarded route is not widened. Truncation probes likewise hit
+21/22 here, but the earlier 68-pair sample lost a hit when truncated; full query
+text therefore remains the production behavior.
+
 ## Context Capsule integration
 
 Capsule не заменяется vector-результатами. Structured current state имеет
