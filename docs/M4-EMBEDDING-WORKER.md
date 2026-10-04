@@ -40,6 +40,14 @@ megabrain-embedding-worker.service (systemd user unit)
 API prewarm загружает модель до первой пользовательской выдачи, а worker больше
 не резервирует под неё отдельный гигабайт памяти.
 
+## Interactive inference tuning
+
+Default `onnx_threads=4` is tuned for the 12-core production host. A local
+single-query/multi-query sweep found 4 threads faster than 2 for both interactive
+latency and tested concurrency; 6 threads helped throughput only at higher
+concurrency and did not improve single-query latency. This setting changes only
+CPU parallelism, not model weights, vectors, dimension, or context length.
+
 ## Backfill
 
 Индексатор сначала заполняет канонические `memory_items`, затем сырые

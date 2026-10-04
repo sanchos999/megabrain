@@ -26,7 +26,7 @@ DEFAULTS = {
     "retrieval_item_candidates": 40,
     "retrieval_query_cache_max": 256,
     "retrieval_query_cache_ttl_s": 300,
-    "onnx_threads": 2,
+    "onnx_threads": 4,
 }
 
 
