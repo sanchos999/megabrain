@@ -344,3 +344,23 @@ URLs. Optional authentication uses `MEGABRAIN_API_TOKEN_FILE`.
 
 This is a regression baseline, not a human-level benchmark. Add representative,
 judged real-world cases before using it to tune ranking weights.
+
+## Live privacy-safe proxy evaluation (2026-10-05)
+
+`scripts/live_memory_quality_eval.py` was rerun read-only with 10 eligible
+high-confidence explicit memories per kind (30 DECISION/CONSTRAINT/TASK query
+pairs). The generated-question diagnostic and production API both returned the
+target at top-1 for 30/30; production API server p50/p95 was 0.43/1.25 ms, with
+zero project leaks and vector-degraded queries in this sample. This test derives
+queries from stored keys and is intentionally treated as a smoke/regression
+check, not a general recall score.
+
+For 12 linked original user messages, the canonical item was top-5 for 11/12;
+server p50/p95 was 7.51/136.22 ms, with no project leaks or vector degradation.
+The guarded E5 comparison also reached 11/12 and its current gate accepted all
+12, so this sample does not justify widening E5 routing. A 60-query RU/EN
+discussion-topic canary reached target top-1 for 60/60 (p50/p95 1.49/5.34 ms).
+Whitespace-equivalent paired semantic requests measured 21.96/21.75 ms median,
+so this run showed no material cache-latency improvement. Small, memory-derived
+samples have lexical overlap and cannot replace independent human labels,
+temporal-update/abstention cases, or downstream task-success evaluation.
