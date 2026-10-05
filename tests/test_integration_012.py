@@ -7,8 +7,10 @@ across worker restarts, durable heartbeats and stale-worker detection.
 """
 from __future__ import annotations
 
+import json
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -73,7 +75,149 @@ def _ok_transport(body):
 def test_fresh_migrations_latest(db):
     with psycopg.connect(DSN) as conn, conn.cursor() as cur:
         cur.execute("SELECT max(version) FROM schema_migrations")
-        assert cur.fetchone()[0] == 10
+        migrations = Path(__file__).resolve().parent.parent / "migrations"
+        latest_migration = max(int(path.name.split("_", 1)[0])
+                               for path in migrations.glob("[0-9][0-9][0-9]_*.sql"))
+        assert cur.fetchone()[0] == latest_migration
+
+
+def test_revision_migration_does_not_order_legacy_timestamp_ties(db):
+    from pathlib import Path
+
+    project = f"legacy_tie_{uuid.uuid4().hex[:8]}"
+    old_event, new_event = f"{project}_old", f"{project}_new"
+    old_item, new_item = f"{project}_item_old", f"{project}_item_new"
+    with psycopg.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO projects (project_id,name) VALUES (%s,%s)",
+                    (project, project))
+        cur.execute("SELECT applied_at FROM schema_migrations WHERE version=12")
+        cutoff = cur.fetchone()[0]
+        legacy_time = cutoff.replace(year=cutoff.year - 1)
+        for event_id, revision in ((old_event, 30), (new_event, 31)):
+            cur.execute(
+                """INSERT INTO events
+                   (event_id,source,project_id,event_type,created_at,observed_at,
+                    project_revision,payload)
+                   VALUES (%s,'legacy-import',%s,'DECISION',%s,%s,%s,%s)""",
+                (event_id, project, legacy_time, legacy_time, revision,
+                 json.dumps({"text": event_id})),
+            )
+        cur.execute(
+            """INSERT INTO memory_items
+               (item_id,project_id,kind,valid_from,valid_to,supersedes_id,
+                source_event_ids,extractor_type,content)
+               VALUES (%s,%s,'DECISION',%s,%s,NULL,ARRAY[%s],'EXPLICIT',%s),
+                      (%s,%s,'DECISION',%s,NULL,%s,ARRAY[%s],'EXPLICIT',%s)""",
+            (old_item, project, legacy_time, legacy_time, old_event,
+             json.dumps({"item_key": "legacy_tie", "title": "old"}),
+             new_item, project, legacy_time, old_item, new_event,
+             json.dumps({"item_key": "legacy_tie", "title": "new"})),
+        )
+        migration = (Path(__file__).resolve().parent.parent / "migrations"
+                     / "017_memory_revision_validity.sql").read_text()
+        cur.execute(migration)
+        cur.execute(
+            """SELECT project_revision_trusted FROM events
+               WHERE event_id = ANY(%s) ORDER BY project_revision""",
+            ([old_event, new_event],),
+        )
+        assert cur.fetchall() == [(False,), (False,)]
+        cur.execute(
+            """SELECT valid_from_revision FROM memory_items
+               WHERE item_id = ANY(%s) ORDER BY item_id""",
+            ([old_item, new_item],),
+        )
+        assert cur.fetchall() == [(None,), (None,)]
+
+
+def test_background_read_probes_close_database_transactions(db):
+    from psycopg.pq import TransactionStatus
+
+    from consolidation.worker import PostgresSchedulerRepository, Settings
+    from operations import scheduler_backlog, worker_rows
+    from storage.pg import Postgres
+
+    pg = Postgres(DSN, None, 4096)
+    repository = PostgresSchedulerRepository(pg, Settings())
+
+    assert repository.candidate_projects() == []
+    assert pg.conn.info.transaction_status == TransactionStatus.IDLE
+    assert not repository.has_important_pending("empty-project")
+    assert pg.conn.info.transaction_status == TransactionStatus.IDLE
+    assert repository.events("empty-project") == []
+    assert pg.conn.info.transaction_status == TransactionStatus.IDLE
+    assert repository.explicit_source_ids("empty-project") == set()
+    assert pg.conn.info.transaction_status == TransactionStatus.IDLE
+    assert worker_rows(pg) == {}
+    assert pg.conn.info.transaction_status == TransactionStatus.IDLE
+    scheduler_backlog(pg)
+    assert pg.conn.info.transaction_status == TransactionStatus.IDLE
+    pg.conn.close()
+
+
+def test_same_timestamp_memory_versions_are_retrievable_by_revision(db, tmp_path):
+    from retrieval.hybrid import HybridRetriever
+    from storage.pg import BlobStore, Postgres
+
+    project = f"revision_{uuid.uuid4().hex[:8]}"
+    timestamp = "2026-09-14T10:00:00Z"
+    pg = Postgres(DSN, BlobStore(str(tmp_path / "blobs")), 4096)
+    revisions = []
+    for event_id, title in (("old", "vector backend alpha"),
+                            ("new", "vector backend beta")):
+        result = pg.append_event({
+            "event_id": f"{project}_{event_id}",
+            "source": "integration-test",
+            "event_type": "DECISION",
+            "created_at": timestamp,
+            "session_id": f"{project}_session",
+            "project_id": project,
+            "payload": {"item_key": "vector_backend", "title": title,
+                        "text": f"The selected vector backend is {title}."},
+        })
+        revisions.append(result["project_revision"])
+
+    assert revisions[1] == revisions[0] + 1
+    with pg.conn.cursor() as cur:
+        cur.execute(
+            "SELECT bool_and(project_revision_trusted) FROM events "
+            "WHERE event_id = ANY(%s)",
+            ([f"{project}_old", f"{project}_new"],),
+        )
+        assert cur.fetchone()[0] is True
+    extra, params = HybridRetriever._item_where(
+        False, project, None, None, revisions[0])
+    with pg.conn.cursor() as cur:
+        cur.execute(
+            "SELECT content->>'title' FROM memory_items mi "
+            "WHERE mi.project_id=%(project_id)s" + extra,
+            {"project_id": project, **params},
+        )
+        assert [row[0] for row in cur.fetchall()] == ["vector backend alpha"]
+
+    extra, params = HybridRetriever._item_where(
+        False, project, None, None, revisions[1])
+    with pg.conn.cursor() as cur:
+        cur.execute(
+            "SELECT content->>'title' FROM memory_items mi "
+            "WHERE mi.project_id=%(project_id)s" + extra,
+            {"project_id": project, **params},
+        )
+        assert [row[0] for row in cur.fetchall()] == ["vector backend beta"]
+
+    retriever = HybridRetriever({
+        "postgres_dsn": DSN,
+        "retrieval_query_cache_max": 0,
+    })
+    before = retriever.search("vector_backend", project_id=project,
+                              at_revision=revisions[0])
+    after = retriever.search("vector_backend", project_id=project,
+                             at_revision=revisions[1])
+    retriever._drop_connection()
+    pg.conn.close()
+    assert "vector backend alpha" in before["results"][0]["text"]
+    assert "vector backend beta" in after["results"][0]["text"]
+    assert before["results"][0]["memory_item_id"] != after["results"][0]["memory_item_id"]
 
 
 def test_atomicity_db_failure_no_partial_state(db):
@@ -84,7 +228,8 @@ def test_atomicity_db_failure_no_partial_state(db):
 
     def failing_record(*args, **kwargs):
         original(*args, **{**kwargs, "commit": False})
-        raise RuntimeError("injected_post_success_failure")
+        if args[3] == "success":
+            raise RuntimeError("injected_post_success_failure")
 
     worker.repository.record = failing_record
     result = worker.run_once()
@@ -151,11 +296,13 @@ def test_heartbeat_and_stale_detection(db):
 
 def test_daily_token_guard_durable(db):
     with psycopg.connect(DSN, autocommit=True) as conn, conn.cursor() as cur:
-        _write_event(cur, "tok", 0)
+        event_id = _write_event(cur, "tok", 0)
     with psycopg.connect(DSN, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("""INSERT INTO consolidation_runs (run_id,project_id,batch_id,event_count,input_hash,
-                       model_requested,status,tokens_in,tokens_in_status,started_at)
-                       VALUES ('seed','tok','b',1,'h','main-auto','success',99900,'REPORTED',now())""")
+        cur.execute("""INSERT INTO consolidation_runs
+                       (run_id,project_id,batch_id,from_event_id,to_event_id,event_count,input_hash,
+                        model_requested,status,tokens_in,tokens_in_status,started_at)
+                       VALUES ('seed','tok','b',%s,%s,1,'h','main-auto',
+                               'success',99900,'REPORTED',now())""", (event_id, event_id))
     worker, pg = _worker(DSN, _ok_transport)
     worker.settings = type(worker.settings)(max_input_tokens_per_day=100_000)
     result = worker.run_once()

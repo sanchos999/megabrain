@@ -104,10 +104,11 @@ judged evaluation and a measured last-mile retrieval policy:
    decomposition when the first-stage evidence is weak or the question is
    explicitly multi-part. Gate any route change on paired recall, abstention,
    project-isolation, and p95 latency—never on speed alone.
-4. Improve temporal ties with an explicit event sequence/observed-at ordering,
-   keeping valid-time and recorded-time distinct. Backfill must be additive and
-   reversible; do not infer an ordering for same-time legacy events without
-   provenance.
+4. Expose revision-aware historical recall using the existing per-project
+   `project_revision` order, keeping valid-time and recorded/system-time
+   distinct. Never fake chronology by adding microseconds to timestamps. Any
+   legacy backfill must be additive, auditable, and leave events without
+   trustworthy provenance explicitly unordered.
 5. Test whether retrieved memories improve a downstream multi-step action
    (runbook/decision continuation) versus a no-memory baseline. Track task
    completion and harmful/stale-memory regressions.

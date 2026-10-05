@@ -83,7 +83,8 @@ def worker_rows(pg) -> dict:
             for key in ("last_heartbeat_at","last_success_at","last_error_at"):
                 if item[key]: item[key] = item[key].isoformat()
             result[item.pop("component")] = item
-        return result
+    pg.conn.commit()
+    return result
 
 
 def scheduler_backlog(pg) -> dict:
@@ -105,9 +106,10 @@ def scheduler_backlog(pg) -> dict:
                        FROM consolidation_projects WHERE pending_event_count>0""",
                    (ABS_MAX_WAIT_S, ABS_MAX_WAIT_S))
         projects, pending, oldest_age_s, overdue = cur.fetchone()
-        return {"dirty_projects": int(projects), "pending_events": int(pending),
-                "oldest_pending_age_s": float(oldest_age_s),
-                "overdue": bool(overdue)}
+    pg.conn.commit()
+    return {"dirty_projects": int(projects), "pending_events": int(pending),
+            "oldest_pending_age_s": float(oldest_age_s),
+            "overdue": bool(overdue)}
 
 
 def dead_letter_stats(path: str) -> dict:

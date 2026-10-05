@@ -23,9 +23,13 @@ class _Cursor:
 class _Connection:
     def __init__(self, result):
         self.value = _Cursor(result)
+        self.commits = 0
 
     def cursor(self):
         return self.value
+
+    def commit(self):
+        self.commits += 1
 
 
 class _Postgres:
@@ -43,6 +47,7 @@ def test_scheduler_backlog_does_not_call_recently_progressing_work_stalled():
     assert "last_success_at IS NULL" in pg.conn.value.sql
     assert "next_eligible_at <= now()" in pg.conn.value.sql
     assert pg.conn.value.params == (ABS_MAX_WAIT_S, ABS_MAX_WAIT_S)
+    assert pg.conn.commits == 1
 
 
 def test_scheduler_backlog_preserves_true_stalled_flag():

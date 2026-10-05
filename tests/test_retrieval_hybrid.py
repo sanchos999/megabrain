@@ -34,6 +34,44 @@ def test_historical_vector_leg_receives_at_time_parameter():
     assert item_vector_params["at"] == at_time
 
 
+def test_revision_snapshot_filters_event_and_item_legs():
+    retriever = HybridRetriever({"retrieval_query_cache_max": 0})
+    retriever._encode_query = lambda _query: [0.0] * 1024
+    cursor = _RecordingCursor()
+
+    retriever._run_legs(cursor, "vector backend", 5, False,
+                        "project-a", None, None, at_revision=17)
+
+    event_fts = next((sql, params) for sql, params in cursor.calls
+                     if "e.fts" in sql)
+    item_fts = next((sql, params) for sql, params in cursor.calls
+                    if "to_tsvector" in sql)
+    event_vector = next((sql, params) for sql, params in cursor.calls
+                        if "order by me.embedding" in sql)
+    item_vector = next((sql, params) for sql, params in cursor.calls
+                       if "order by mie.embedding" in sql)
+    assert "e.project_revision_trusted is true" in event_fts[0]
+    assert "e.project_revision <= %(at_revision)s" in event_fts[0]
+    assert "mi.valid_from_revision <= %(at_revision)s" in item_fts[0]
+    assert "mi.valid_to_revision > %(at_revision)s" in item_fts[0]
+    assert "e.project_revision_trusted is true" in event_vector[0]
+    assert "e.project_revision <= %(at_revision)s" in event_vector[0]
+    assert "mi.valid_from_revision <= %(at_revision)s" in item_vector[0]
+    assert all(call[1]["at_revision"] == 17 for call in
+               (event_fts, item_fts, event_vector, item_vector))
+
+
+def test_revision_snapshot_requires_project_scope():
+    retriever = HybridRetriever()
+
+    try:
+        retriever.search("decision", at_revision=17)
+    except ValueError as error:
+        assert "project_id" in str(error)
+    else:
+        raise AssertionError("revision snapshots must be project-scoped")
+
+
 def test_as_of_exact_key_filter_accepts_historical_versions():
     at_time = "2026-08-15T00:00:00Z"
     extra, params = HybridRetriever._item_where(False, "project-a", None, at_time)

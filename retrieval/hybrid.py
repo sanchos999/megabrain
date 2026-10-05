@@ -309,12 +309,22 @@ class HybridRetriever:
 
     @staticmethod
     def _item_where(deep: bool, project_id: str | None,
-                    session_id: str | None, at_time: str | None) -> tuple[str, dict]:
+                    session_id: str | None, at_time: str | None,
+                    at_revision: int | None = None) -> tuple[str, dict]:
         extra, params = "", {}
         if project_id:
             extra += " and mi.project_id = %(project_id)s"
             params["project_id"] = project_id
-        if at_time:
+        if at_revision is not None:
+            extra += (" and mi.valid_from_revision is not null"
+                      " and mi.valid_from_revision <= %(at_revision)s"
+                      " and (mi.valid_to_revision is null"
+                      " or mi.valid_to_revision > %(at_revision)s)")
+            params["at_revision"] = at_revision
+            if at_time:
+                extra += " and mi.valid_from <= %(at)s and (mi.valid_to is null or mi.valid_to > %(at)s)"
+                params["at"] = at_time
+        elif at_time:
             extra += " and mi.valid_from <= %(at)s and (mi.valid_to is null or mi.valid_to > %(at)s)"
             params["at"] = at_time
         else:
@@ -330,7 +340,8 @@ class HybridRetriever:
 
     def _run_legs(self, cur, query: str, limit: int, deep: bool,
                   project_id: str | None, session_id: str | None,
-                  at_time: str | None) -> tuple[list[Row], list[Row], list[Row], list[Row], bool]:
+                  at_time: str | None,
+                  at_revision: int | None = None) -> tuple[list[Row], list[Row], list[Row], list[Row], bool]:
         vec_ok = False
         event_vec_rows: list[Row] = []
         item_vec_rows: list[Row] = []
@@ -339,10 +350,15 @@ class HybridRetriever:
         if at_time:
             fts_params["at"] = at_time
             event_extra += " and e.created_at <= %(at)s"
+        if at_revision is not None:
+            fts_params["at_revision"] = at_revision
+            event_extra += (" and e.project_revision_trusted is true"
+                            " and e.project_revision <= %(at_revision)s")
         cur.execute(self.FTS_SQL + event_extra + " order by e.created_at desc limit %(lim)s", fts_params)
         event_fts_rows = self._fetch(cur)
 
-        item_extra, item_params = self._item_where(deep, project_id, session_id, at_time)
+        item_extra, item_params = self._item_where(
+            deep, project_id, session_id, at_time, at_revision)
         item_fts_params = {"q": query, "lim": limit * 3, **item_params}
         cur.execute(self.ITEM_FTS_SQL + item_extra + " order by mi.valid_from desc limit %(lim)s",
                     item_fts_params)
@@ -365,6 +381,8 @@ class HybridRetriever:
             # named parameter present for the vector leg as well; otherwise a
             # historical query silently degrades to FTS-only on psycopg.
             vparams["at"] = at_time
+        if at_revision is not None:
+            vparams["at_revision"] = at_revision
         try:
             cur.execute(self.VEC_SQL + event_extra +
                         " order by me.embedding <=> %(vec)s::vector limit %(lim)s", vparams)
@@ -513,7 +531,10 @@ class HybridRetriever:
 
     def search(self, query: str, mode: str = "WARM", limit: int = 10,
                project_id: str | None = None, session_id: str | None = None,
-               at_time: str | None = None) -> dict:
+               at_time: str | None = None,
+               at_revision: int | None = None) -> dict:
+        if at_revision is not None and not project_id:
+            raise ValueError("at_revision requires a project_id")
         t0 = time.perf_counter()
         deep = mode == "DEEP"
         top_n = limit * 3 if not deep else max(limit * 5, 50)
@@ -532,14 +553,14 @@ class HybridRetriever:
                 ))
                 exact_rows = []
                 exact_topic_request = bool(key or topic) and not deep and (
-                    at_time is not None or not history_request)
+                    at_time is not None or at_revision is not None or not history_request)
                 if exact_topic_request:
                     item_extra, item_params = self._item_where(
-                        False, project_id, session_id, at_time)
+                        False, project_id, session_id, at_time, at_revision)
                     # SUPERSEDED describes current status, not whether a row
                     # was valid at the requested historical instant.
                     current_status_filter = (
-                        "" if at_time is not None
+                        "" if at_time is not None or at_revision is not None
                         else " and coalesce(mi.content->>'status', '') <> 'SUPERSEDED'"
                     )
                     if topic:
@@ -561,7 +582,7 @@ class HybridRetriever:
                         if exact_rows:
                             vector_skipped = True
                             vector_skip_reason = "exact_item_topic"
-                    temporal_topic_key = topic if at_time is not None else None
+                    temporal_topic_key = topic if at_time is not None or at_revision is not None else None
                     fallback_item_key = key or temporal_topic_key
                     if not exact_rows and fallback_item_key:
                         cur.execute(
@@ -584,7 +605,7 @@ class HybridRetriever:
                     history_request = history_request or deep
                     if (self.cfg.get("retrieval_e5_fast_path", False)
                             and explicit_topic and project_id and not history_request
-                            and at_time is None):
+                            and at_time is None and at_revision is None):
                         e5_rows = self._confident_e5_items(
                             cur, query, limit, project_id, session_id)
                     if e5_rows:
@@ -594,7 +615,7 @@ class HybridRetriever:
                     else:
                         event_fts, item_fts, event_vec, item_vec, vec_ok = self._run_legs(
                             cur, query, top_n if deep else limit, deep,
-                            project_id, session_id, at_time)
+                            project_id, session_id, at_time, at_revision)
                     rrf = self._rrf(event_fts + item_fts, event_vec + item_vec,
                                     max(limit * 3, 20))
                 event_ids = [r[1] for r, _, _ in rrf if r[2] is None and r[1]]
@@ -610,7 +631,7 @@ class HybridRetriever:
              item_superseded) = row
             f = flags.get(event_id, {}) if item_id is None else {}
             superseded = bool(item_superseded or f.get("superseded", False))
-            if at_time is None and item_id is None and superseded:
+            if at_time is None and at_revision is None and item_id is None and superseded:
                 score *= 0.25
             score *= self._intent_weight(query, row)
             score *= self._exact_text_weight(query, text)
@@ -647,6 +668,7 @@ class HybridRetriever:
             results.append(result)
         return {
             "query": query, "mode": mode, "limit": limit,
+            "at_revision": at_revision,
             "vector_leg": vec_ok,
             "vector_degraded": not vec_ok and not vector_skipped,
             "vector_error": None if vector_skipped else getattr(self._local, "vector_error", None),

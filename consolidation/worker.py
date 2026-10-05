@@ -256,7 +256,9 @@ class PostgresSchedulerRepository:
                 ORDER BY first_dirty_at, project_id""",
                 (self.settings.project_scope, self.settings.project_scope))
             columns = [item.name for item in cur.description]
-            return [dict(zip(columns, row)) for row in cur.fetchall()]
+            result = [dict(zip(columns, row)) for row in cur.fetchall()]
+        self.pg.conn.commit()
+        return result
 
     def has_important_pending(self, project_id: str) -> bool:
         with self.pg.conn.cursor() as cur:
@@ -268,9 +270,11 @@ class PostgresSchedulerRepository:
                   AND e.event_type=ANY(%s)
                   AND (e.payload::text ILIKE ANY(%s) OR e.metadata::text ILIKE ANY(%s))
                 LIMIT 1""",
-                (project_id, list(MEANINGFUL),
+                 (project_id, list(MEANINGFUL),
                  [f"%{m}%" for m in IMPORTANCE_MARKERS], [f"%{m}%" for m in IMPORTANCE_MARKERS]))
-            return cur.fetchone() is not None
+            found = cur.fetchone() is not None
+        self.pg.conn.commit()
+        return found
 
     def eligible_project(self) -> str | None:
         """Adaptive eligibility: idle window by pending class, importance fast path,
@@ -310,7 +314,9 @@ class PostgresSchedulerRepository:
                 ORDER BY e.created_at,e.event_id LIMIT %s""",
                 (project_id, list(MEANINGFUL), self.settings.max_batch_events))
             columns = [item.name for item in cur.description]
-            return [dict(zip(columns, row)) for row in cur.fetchall()]
+            result = [dict(zip(columns, row)) for row in cur.fetchall()]
+        self.pg.conn.commit()
+        return result
 
     def explicit_source_ids(self, project_id: str) -> set[str]:
         """Source ids already materialized as explicit memory (dedup vs consolidation)."""
@@ -321,7 +327,8 @@ class PostgresSchedulerRepository:
             found: set[str] = set()
             for row in cur.fetchall():
                 found.update(row[0] or [])
-            return found
+        self.pg.conn.commit()
+        return found
 
     def rate_guard(self) -> tuple[bool, str | None]:
         with self.pg.conn.cursor() as cur:
@@ -341,7 +348,9 @@ class PostgresSchedulerRepository:
             cur.execute("""SELECT COALESCE(sum(COALESCE(tokens_in,tokens_in_estimated,0)),0)
                 FROM consolidation_runs
                 WHERE started_at >= current_date AND status IN ('dispatching','success')""")
-            return int(cur.fetchone()[0])
+            result = int(cur.fetchone()[0])
+        self.pg.conn.commit()
+        return result
 
     def reserve_dispatch(self, project_id: str, events: list[dict], digest: str) -> tuple[bool, str | None]:
         """Reserve the billable dispatch under a transaction/advisory lock."""
@@ -368,12 +377,15 @@ class PostgresSchedulerRepository:
             daily = float(cur.fetchone()[0])
             cur.execute("SELECT COALESCE(sum(estimated_cost),0) FROM consolidation_runs WHERE started_at >= date_trunc('month', now()) AND status IN ('success','failed','dispatching')")
             monthly = float(cur.fetchone()[0])
-            return daily, monthly
+        self.pg.conn.commit()
+        return daily, monthly
 
     def duplicate(self, project_id: str, digest: str) -> bool:
         with self.pg.conn.cursor() as cur:
             cur.execute("SELECT 1 FROM consolidation_runs WHERE project_id=%s AND input_hash=%s", (project_id, digest))
-            return cur.fetchone() is not None
+            exists = cur.fetchone() is not None
+        self.pg.conn.commit()
+        return exists
 
     def record(self, project_id: str, events: list[dict], digest: str, status: str, *, commit: bool = True, **values: Any) -> None:
         batch, _ = batch_id(project_id, events)

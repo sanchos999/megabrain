@@ -206,8 +206,10 @@ class Postgres:
         elif et == "TASK_UPDATE":
             derived.append(("TASK", payload))
 
+        memory_changes = []
         for kind, content in derived:
-            self._upsert_memory_item(cur, project_id, kind, content, ev)
+            memory_changes.append(
+                self._upsert_memory_item(cur, project_id, kind, content, ev))
 
         if project_id:
             # Mark only meaningful prose/operational events for asynchronous
@@ -227,7 +229,8 @@ class Postgres:
                          updated_at=now()""",
                     (project_id,),
                 )
-            return self._bump_revision(cur, project_id, ev["event_id"])
+            return self._bump_revision(
+                cur, project_id, ev["event_id"], memory_changes)
         return None
 
     def _upsert_memory_item(self, cur, project_id, kind, content: dict, ev: dict):
@@ -260,8 +263,10 @@ class Postgres:
             cur.execute(
                 "UPDATE memory_items SET valid_to=%s WHERE item_id=%s",
                 (ev["created_at"], supersedes))
+        return item_id, supersedes, valid_to is not None
 
-    def _bump_revision(self, cur, project_id: str, event_id: str) -> int:
+    def _bump_revision(self, cur, project_id: str, event_id: str,
+                       memory_changes: list[tuple[str, str | None, bool]] | None = None) -> int:
         cur.execute(
             "UPDATE projects SET revision=revision+1, updated_at=now() WHERE project_id=%s RETURNING revision",
             (project_id,))
@@ -269,8 +274,27 @@ class Postgres:
         # Store the exact project boundary on the immutable event. This makes
         # Context Capsule deltas deterministic instead of using time/order as
         # an approximation.
-        cur.execute("UPDATE events SET project_revision=%s WHERE event_id=%s",
+        cur.execute("""UPDATE events
+                       SET project_revision=%s, project_revision_trusted=true
+                       WHERE event_id=%s""",
                     (rev, event_id))
+        # Tie structured-memory validity to the same exact event order. This is
+        # deliberately separate from valid_from/valid_to (wall-clock time).
+        if memory_changes:
+            created_ids = [item_id for item_id, _supersedes, _terminal in memory_changes]
+            closed_ids = [supersedes for _item_id, supersedes, _terminal in memory_changes
+                          if supersedes]
+            closed_ids.extend(item_id for item_id, _supersedes, terminal in memory_changes
+                              if terminal)
+            cur.execute(
+                """UPDATE memory_items SET valid_from_revision=%s
+                   WHERE item_id = ANY(%s) AND valid_from_revision IS NULL""",
+                (rev, created_ids))
+            if closed_ids:
+                cur.execute(
+                    """UPDATE memory_items SET valid_to_revision=%s
+                       WHERE item_id = ANY(%s) AND valid_to_revision IS NULL""",
+                    (rev, closed_ids))
         return rev
 
     # ---------------- reads ----------------
@@ -415,20 +439,36 @@ class Postgres:
                 (project_id, kind, item_key))
             row = cur.fetchone()
             supersedes = row[0] if row else None
+            cur.execute(
+                """SELECT CASE
+                         WHEN count(*) = cardinality(%s::text[])
+                          AND bool_and(project_revision_trusted IS TRUE)
+                         THEN max(project_revision)
+                         ELSE NULL
+                       END
+                   FROM events
+                   WHERE project_id=%s AND event_id = ANY(%s)
+                     AND project_revision IS NOT NULL""",
+                (source_event_ids, project_id, source_event_ids))
+            source_revision = cur.fetchone()[0]
             # item_id must be unique per insertion (idempotency is via item_key
             # supersede check above, not item_id).
             item_id = "mem_" + __import__("uuid").uuid4().hex[:24]
             cur.execute(
                 """INSERT INTO memory_items
                    (item_id, project_id, kind, valid_from, valid_to, supersedes_id,
+                    valid_from_revision,
                     source_event_ids, confidence, extractor_type, extractor_version, content)
-                   VALUES (%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s)""",
-                (item_id, project_id, kind, created_at, supersedes,
+                   VALUES (%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s,%s)""",
+                (item_id, project_id, kind, created_at, supersedes, source_revision,
                  source_event_ids, confidence, extractor, extractor_version,
                  Json(content)))
             if supersedes:
-                cur.execute("UPDATE memory_items SET valid_to=%s WHERE item_id=%s",
-                            (created_at, supersedes))
+                cur.execute(
+                    """UPDATE memory_items SET valid_to=%s,
+                              valid_to_revision=coalesce(%s, valid_to_revision)
+                       WHERE item_id=%s""",
+                    (created_at, source_revision, supersedes))
             if commit:
                 self.conn.commit()
         return {"item_id": item_id, "superseded": supersedes}

@@ -273,6 +273,9 @@ def test_scheduler_fetches_bounded_raw_events_before_python_prefilter():
         def cursor(self):
             return self.cur
 
+        def commit(self):
+            pass
+
     class PG:
         def __init__(self):
             self.conn = Connection()

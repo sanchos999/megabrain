@@ -160,13 +160,18 @@ async def health_live():
 
 @app.get("/health/ready")
 async def health_ready():
+    conn = None
     try:
-        with STATE["pg"].conn.cursor() as cur:
+        conn = STATE["pg"].conn
+        with conn.cursor() as cur:
             cur.execute("SELECT 1")
             cur.execute("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1")
             migration = cur.fetchone()[0]
+        conn.commit()
         return {"status": "ok", "postgres": True, "schema_version": migration, "redis": STATE["redis"].ping()}
     except Exception as error:
+        if conn is not None and not conn.closed:
+            conn.rollback()
         return JSONResponse(status_code=503, content={"status":"error","error_class":type(error).__name__})
 
 
@@ -198,6 +203,10 @@ async def health_ops():
         return {"status": state, "version": VERSION, "workers": workers, "services": services,
                 "outbox": outbox, "dead_letters": dlq, "scheduler": backlog, "reasons": sorted(set(degraded))}
     except Exception as error:
+        try:
+            STATE["pg"].conn.rollback()
+        except Exception:
+            pass
         return JSONResponse(status_code=503, content={"status": "ERROR", "error_class": type(error).__name__})
 
 
@@ -403,6 +412,7 @@ class MemorySearchIn(BaseModel):
     mode: str | None = None          # NONE|HOT|WARM|DEEP; absent = deterministic
     limit: int = Field(default=10, ge=1, le=50)
     at_time: str | None = None       # ISO timestamp: historical query
+    at_revision: int | None = Field(default=None, ge=1)  # project-scoped event-order snapshot
 
 
 class EmbeddingBatchIn(BaseModel):
@@ -468,6 +478,8 @@ async def internal_e5_embeddings(body: E5EmbeddingBatchIn, request: Request):
 
 @app.post("/v1/memory/search", dependencies=[Depends(require_auth)])
 async def memory_search(s: MemorySearchIn):
+    if s.at_revision is not None and not s.project_id:
+        raise HTTPException(status_code=422, detail="at_revision requires project_id")
     try:
         mode = select_mode(s.query, s.mode)
     except ValueError as e:
@@ -476,6 +488,10 @@ async def memory_search(s: MemorySearchIn):
     if mode == "NONE":
         return {"query": s.query, "mode": "NONE", "count": 0, "results": [],
                 "memory_disabled": True}
+
+    # The current-state capsule cannot represent historical snapshots.
+    if mode == "HOT" and s.at_revision is not None:
+        mode = "WARM"
 
     if mode == "HOT":
         # structured current state only: resolve project, return hot capsule
@@ -497,7 +513,7 @@ async def memory_search(s: MemorySearchIn):
         _get_retriever().search,
         query=s.query, mode=mode, limit=s.limit,
         project_id=s.project_id, session_id=s.session_id,
-        at_time=s.at_time)
+        at_time=s.at_time, at_revision=s.at_revision)
     if res.get("vector_degraded"):
         STATE["telemetry"].inc("retrieval_vector_degraded")
     elif res.get("vector_leg"):

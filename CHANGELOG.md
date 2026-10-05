@@ -2,6 +2,20 @@
 
 Все значимые изменения проекта фиксируются здесь. Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/).
 
+## [Unreleased]
+
+### Добавлено
+- Исторический поиск по точной ревизии проекта (`at_revision`) для различения
+  версий памяти, записанных в один момент времени. Ревизионные границы
+  выводятся из provenance; неоднозначные старые совпадения остаются без
+  искусственно назначенного порядка.
+
+### Добавлено (English)
+- Exact project-revision historical search (`at_revision`) to distinguish
+  memory versions recorded at the same wall-clock time. Revision boundaries
+  come from provenance; ambiguous legacy ties are left unordered rather than
+  assigned a fabricated order.
+
 ## [0.2.1] - 2026-10-03
 
 ### Совместимость тестового стека

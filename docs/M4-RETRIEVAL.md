@@ -19,7 +19,8 @@ Production memory retrieval: POST /v1/memory/search
   "session_id": null,
   "mode": null,          // NONE|HOT|WARM|DEEP; absent = deterministic
   "limit": 10,           // 1..50
-  "at_time": null        // ISO timestamp: historical query
+  "at_time": null,       // ISO timestamp: valid-time historical query
+  "at_revision": null    // project-scoped exact event-order snapshot
 }
 ```
 
@@ -50,6 +51,18 @@ Similarity НЕ определяет current truth. После retrieval:
   флаг superseded=true передаётся клиенту
 - historical query (at_time): события после at_time исключаются из обеих ног
   (FTS и VECTOR), историческое состояние возвращается как есть
+- revision snapshot (at_revision): per-project event ordering selects the
+  state at an exact project revision, even when event timestamps are equal
+
+`at_revision` is project-scoped and uses the immutable `events.project_revision`
+sequence independently from wall-clock timestamps. Canonical items carry
+`[valid_from_revision, valid_to_revision)` boundaries derived from
+source-event provenance. Revisions on post-tracking writes are exact;
+ambiguous pre-tracking timestamp ties are excluded rather than given a
+fabricated order. This disambiguates same-timestamp updates without modifying
+their effective timestamps. Supplying both `at_time` and
+`at_revision` applies both filters. Legacy items without a trustworthy source
+revision remain unordered and are omitted from revision snapshots.
 
 Supersession: memory_items.supersedes_id + valid_to; item_key
 (напр. «vector_backend») при повторном DECISION-событии автоматически
