@@ -141,7 +141,7 @@ isolation and reliability.
   intentionally excluded.
 - Readiness, operations, scheduler, and E5 indexer read paths now close
   PostgreSQL transactions before waiting. The live health check reports schema
-  17 and healthy API/worker dependencies; the observed idle-in-transaction
+  18 and healthy API/worker dependencies; the observed idle-in-transaction
   count after restart was zero.
 - A 120-memory live proxy run returned target top-1 for all generated
   topic/key questions. On 46 original source-message queries, canonical target
