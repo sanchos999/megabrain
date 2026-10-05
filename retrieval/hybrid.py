@@ -155,9 +155,9 @@ class HybridRetriever:
                (mi.valid_to is not null) as superseded
         from memory_items mi
         where lower(mi.content->>'item_key') = lower(%(item_key)s)
-          and mi.valid_to is null and mi.confidence >= 0.9
+          and mi.confidence >= 0.9
           and mi.extractor_type = 'EXPLICIT'
-          and coalesce(mi.content->>'status', '') not in ('REJECTED', 'SUPERSEDED')
+          and coalesce(mi.content->>'status', '') <> 'REJECTED'
           and coalesce(mi.content->>'content_status', '') <> 'REJECTED_EMPTY'
     """
 
@@ -461,8 +461,14 @@ class HybridRetriever:
             if match:
                 candidate = " ".join(match.group(1).strip(" `\"'()[]{}").split())
                 topic = HybridRetriever._short_topic(candidate)
-                if topic:
+                if topic and len(topic) <= 120:
                     return topic
+                # Explicit question shells make longer literal topics
+                # unambiguous; accepting them avoids dropping exact-key
+                # queries into broad semantic retrieval. Keep the bound small.
+                words = candidate.split()
+                if 1 <= len(words) <= 20 and 4 <= len(candidate) <= 120:
+                    return candidate
         return None
 
     @staticmethod
@@ -525,14 +531,24 @@ class HybridRetriever:
                     "previous", "earlier", "history", "before", "prior", "last year", "last time", "old",
                 ))
                 exact_rows = []
-                if (key or topic) and not deep and at_time is None and not history_request:
-                    item_extra, item_params = self._item_where(False, project_id, session_id, None)
+                exact_topic_request = bool(key or topic) and not deep and (
+                    at_time is not None or not history_request)
+                if exact_topic_request:
+                    item_extra, item_params = self._item_where(
+                        False, project_id, session_id, at_time)
+                    # SUPERSEDED describes current status, not whether a row
+                    # was valid at the requested historical instant.
+                    current_status_filter = (
+                        "" if at_time is not None
+                        else " and coalesce(mi.content->>'status', '') <> 'SUPERSEDED'"
+                    )
                     if topic:
                         cur.execute(
                             self.ITEM_FTS_SQL + item_extra
                             + " and mi.confidence >= 0.9 and mi.extractor_type = 'EXPLICIT'"
-                              " and coalesce(mi.content->>'status', '') not in ('REJECTED', 'SUPERSEDED')"
-                              " and coalesce(mi.content->>'content_status', '') <> 'REJECTED_EMPTY'"
+                              " and coalesce(mi.content->>'status', '') <> 'REJECTED'"
+                            + current_status_filter
+                            + " and coalesce(mi.content->>'content_status', '') <> 'REJECTED_EMPTY'"
                             + " order by mi.confidence desc, mi.valid_from desc limit %(lim)s",
                             {"q": topic, "lim": max(limit * 3, 20), **item_params},
                         )
@@ -545,11 +561,14 @@ class HybridRetriever:
                         if exact_rows:
                             vector_skipped = True
                             vector_skip_reason = "exact_item_topic"
-                    if not exact_rows and key:
+                    temporal_topic_key = topic if at_time is not None else None
+                    fallback_item_key = key or temporal_topic_key
+                    if not exact_rows and fallback_item_key:
                         cur.execute(
-                            self.ITEM_KEY_SQL + item_extra
+                            self.ITEM_KEY_SQL + item_extra + current_status_filter
                             + " order by mi.confidence desc, mi.valid_from desc limit %(lim)s",
-                            {"item_key": key, "lim": max(limit * 3, 20), **item_params},
+                            {"item_key": fallback_item_key,
+                             "lim": max(limit * 3, 20), **item_params},
                         )
                         exact_rows = self._fetch(cur)
                 if exact_rows:

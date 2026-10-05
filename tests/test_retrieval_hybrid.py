@@ -34,6 +34,17 @@ def test_historical_vector_leg_receives_at_time_parameter():
     assert item_vector_params["at"] == at_time
 
 
+def test_as_of_exact_key_filter_accepts_historical_versions():
+    at_time = "2026-08-15T00:00:00Z"
+    extra, params = HybridRetriever._item_where(False, "project-a", None, at_time)
+
+    assert "mi.valid_from <= %(at)s" in extra
+    assert "mi.valid_to > %(at)s" in extra
+    assert params["at"] == at_time
+    assert "mi.valid_to is null" not in HybridRetriever.ITEM_KEY_SQL.lower()
+    assert "not in ('rejected', 'superseded')" not in HybridRetriever.ITEM_KEY_SQL.lower()
+
+
 def test_memory_item_key_is_in_vector_search_text_and_worker_embedding_text():
     retriever = HybridRetriever({"retrieval_query_cache_max": 0})
     retriever._encode_query = lambda _query: [0.0] * 1024
@@ -55,6 +66,23 @@ def test_memory_item_key_is_in_vector_search_text_and_worker_embedding_text():
     worker_cursor = EmptyCursor()
     assert fetch_item_batch(worker_cursor, 1) == []
     assert "mi.content->>'item_key'" in worker_cursor.sql
+
+
+def test_explicit_question_shell_accepts_bounded_long_topic():
+    topic = "long running temporal memory retrieval optimization topic"
+    query = f"What did we decide about {topic}?"
+
+    assert HybridRetriever._question_topic(query) == topic
+
+
+def test_explicit_question_shell_accepts_single_token_identifier():
+    assert HybridRetriever._question_topic("What did we decide about Redis?") == "Redis"
+
+
+def test_explicit_question_shell_rejects_overlong_topic():
+    query = "What did we decide about " + "many long words " * 12 + "topic?"
+
+    assert HybridRetriever._question_topic(query) is None
 
 
 def test_embedding_worker_accepts_ndarray_and_json_vector_rows():
