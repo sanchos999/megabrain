@@ -43,9 +43,8 @@ uncertainty, and success on later tasks.
 - [APEX-MEM (ACL 2026)](https://aclanthology.org/2026.acl-long.749/) emphasizes
   entity-centered temporal events, append-only history, and resolving conflicts
   at retrieval time. MegaBrain already keeps source events and versioned facts;
-  its production temporal probe validates ordinary nonzero intervals, but
-  same-instant replacements still need a deterministic sequence/tie-break
-  representation before the oldest state can be recalled at a sub-instant.
+  same-instant replacements now use the existing project revision sequence as
+  an independent historical axis, preserving wall-clock timestamps unchanged.
 - [LightMem (ACL 2026)](https://aclanthology.org/2026.acl-long.588/) separates
   online retrieval/writing from bounded-cost offline consolidation and uses a
   staged short-/mid-/long-term design. This supports keeping expensive
@@ -104,11 +103,10 @@ judged evaluation and a measured last-mile retrieval policy:
    decomposition when the first-stage evidence is weak or the question is
    explicitly multi-part. Gate any route change on paired recall, abstention,
    project-isolation, and p95 latency—never on speed alone.
-4. Expose revision-aware historical recall using the existing per-project
-   `project_revision` order, keeping valid-time and recorded/system-time
-   distinct. Never fake chronology by adding microseconds to timestamps. Any
-   legacy backfill must be additive, auditable, and leave events without
-   trustworthy provenance explicitly unordered.
+4. Keep revision-aware historical recall on the existing per-project
+   `project_revision` order, distinct from valid-time. Never fake chronology by
+   adding microseconds to timestamps. The additive backfill leaves legacy
+   events without trustworthy provenance explicitly unordered.
 5. Test whether retrieved memories improve a downstream multi-step action
    (runbook/decision continuation) versus a no-memory baseline. Track task
    completion and harmful/stale-memory regressions.
@@ -122,3 +120,26 @@ These are hypotheses and a validation plan, not claims that a new design is
 already better. A defensible improvement is one that beats the current
 production baseline on held-out, independently labeled cases while preserving
 isolation and reliability.
+
+## 2026-10-05 production change and diagnostic
+
+- Added `at_revision` snapshots over trusted per-project event revisions and
+  provenance-derived canonical-memory intervals. Same-wall-time supersessions
+  can now be queried on either side of the update without altering timestamps.
+- Added `scripts/live_revision_memory_eval.py`, a read-only aggregate-only probe
+  for same-wall-time replacements. The first 40-pair production sample returned
+  the expected current and historical item at rank 1 in all cases, with zero
+  future-item leakage, project leakage, or vector-degraded queries; measured
+  server p95 was 0.44 ms current and 0.89 ms historical. Queries are generated
+  from stored item keys, so these figures validate plumbing and ranking on a
+  targeted sample, not human-level memory or general question understanding.
+- The existing timestamp-based production probe independently returned 40/40
+  current and historical top-1 results with zero temporal violations. It also
+  confirms why revision order matters: 189 of 254 sampled supersession pairs
+  have tied or inverted wall-clock intervals. Revision snapshots recover order
+  only where provenance is trustworthy; ambiguous legacy source events remain
+  intentionally excluded.
+- Readiness, operations, scheduler, and E5 indexer read paths now close
+  PostgreSQL transactions before waiting. The live health check reports schema
+  17 and healthy API/worker dependencies; the observed idle-in-transaction
+  count after restart was zero.

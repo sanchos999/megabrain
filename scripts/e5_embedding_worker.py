@@ -109,6 +109,10 @@ def main() -> int:
                 with psycopg.connect(cfg["postgres_dsn"], connect_timeout=15) as conn:
                     with conn.cursor() as cur:
                         batch = fetch_batch(cur)
+                    # Release the read snapshot before either sleeping or
+                    # calling the embedding API. Keeping it open while idle
+                    # blocks schema maintenance and retains dead tuples.
+                    conn.commit()
                     if not batch:
                         heartbeat.update(state="IDLE", processed_items=0,
                                          success=True, detail="index_current")

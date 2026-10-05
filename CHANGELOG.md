@@ -16,6 +16,16 @@
   come from provenance; ambiguous legacy ties are left unordered rather than
   assigned a fabricated order.
 
+### Исправлено
+- E5 shadow-indexer теперь завершает транзакцию сразу после чтения batch,
+  до ожидания или вызова embedding API; idle-опросы больше не удерживают
+  снимок PostgreSQL и не мешают миграциям.
+
+### Fixed (English)
+- E5 shadow-indexer now commits immediately after reading a batch, before
+  sleeping or calling the embedding API, avoiding idle PostgreSQL snapshots
+  that can obstruct migrations.
+
 ## [0.2.1] - 2026-10-03
 
 ### Совместимость тестового стека
