@@ -220,6 +220,46 @@ def test_same_timestamp_memory_versions_are_retrievable_by_revision(db, tmp_path
     assert before["results"][0]["memory_item_id"] != after["results"][0]["memory_item_id"]
 
 
+def test_hybrid_retrieval_hydrates_memory_linked_to_top_source_event(db, tmp_path):
+    from retrieval.hybrid import HybridRetriever
+    from storage.pg import BlobStore, Postgres
+
+    project = f"provenance_{uuid.uuid4().hex[:8]}"
+    event_id = f"{project}_event"
+    pg = Postgres(DSN, BlobStore(str(tmp_path / "blobs")), 4096)
+    pg.append_event({
+        "event_id": event_id,
+        "source": "integration-test",
+        "event_type": "USER_MESSAGE",
+        "created_at": "2026-09-14T10:00:00Z",
+        "session_id": f"{project}_session",
+        "project_id": project,
+        "payload": {"text": "Violet compass under the northern arch; preserve this unique source."},
+    })
+    pg.add_derived_item(
+        project, "TASK",
+        {"title": "Coordinate next follow-up", "summary": "Send the assigned handover note.",
+         "item_key": f"followup_{uuid.uuid4().hex[:8]}"},
+        [event_id], confidence=0.99, extractor="EXPLICIT", status="CONFIRMED",
+    )
+    retriever = HybridRetriever({
+        "postgres_dsn": DSN,
+        "retrieval_query_cache_max": 0,
+    })
+    retriever._encode_query = lambda _query: None
+
+    result = retriever.search(
+        "Violet compass under the northern arch", project_id=project, limit=5)
+    retriever._drop_connection()
+    pg.conn.close()
+
+    linked = [hit for hit in result["results"]
+              if hit.get("source_event_ids") == [event_id]]
+    assert linked
+    assert linked[0]["memory_kind"] == "TASK"
+    assert "PROVENANCE" in linked[0]["retrieval_source"]
+
+
 def test_atomicity_db_failure_no_partial_state(db):
     with psycopg.connect(DSN, autocommit=True) as conn, conn.cursor() as cur:
         _write_event(cur, "atomic", 0)

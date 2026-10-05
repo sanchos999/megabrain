@@ -56,6 +56,10 @@ Similarity НЕ определяет current truth. После retrieval:
 - oversized semantic/FTS input is bounded to 512 normalized characters (head
   and tail) to cap tokenizer and lexical-query work; exact routing and final
   reranking still use the original query
+- when raw events rank in the top five, merge or hydrate their high-confidence
+  explicit companions by `source_event_ids`; project, session, valid-time, and
+  revision filters remain in force. The GIN index on provenance IDs keeps this
+  targeted lookup bounded as the memory grows.
 
 `at_revision` is project-scoped and uses the immutable `events.project_revision`
 sequence independently from wall-clock timestamps. Canonical items carry

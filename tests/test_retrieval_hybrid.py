@@ -72,6 +72,23 @@ def test_revision_snapshot_requires_project_scope():
         raise AssertionError("revision snapshots must be project-scoped")
 
 
+def test_provenance_lookup_keeps_project_and_revision_filters():
+    retriever = HybridRetriever()
+    cursor = _RecordingCursor()
+
+    assert retriever._provenance_items(
+        cursor, ["event-a"], "project-a", None, None, 17) == []
+
+    sql, params = cursor.calls[0]
+    assert "mi.source_event_ids && %(source_event_ids)s" in sql
+    assert "mi.project_id = %(project_id)s" in sql
+    assert "mi.valid_from_revision <= %(at_revision)s" in sql
+    assert "mi.valid_to_revision > %(at_revision)s" in sql
+    assert params["source_event_ids"] == ["event-a"]
+    assert params["project_id"] == "project-a"
+    assert params["at_revision"] == 17
+
+
 def test_fts_bounds_long_query_and_preserves_both_ends():
     query = "memory retrieval context " * 40
     retriever = HybridRetriever({"retrieval_query_cache_max": 0})

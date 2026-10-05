@@ -53,7 +53,11 @@ def _sample(dsn: str, per_kind: int) -> list[dict]:
         for kind in QUESTIONS:
             rows = conn.execute(
                 """SELECT mi.item_id, mi.project_id, mi.kind, mi.content,
-                          mi.source_event_ids, mi.confidence, src.payload->>'text'
+                          mi.source_event_ids, mi.confidence, src.payload->>'text',
+                          EXISTS (SELECT 1 FROM memory_item_embeddings mie
+                                  WHERE mie.item_id=mi.item_id),
+                          EXISTS (SELECT 1 FROM memory_embeddings me
+                                  WHERE me.event_id=ANY(mi.source_event_ids))
                      FROM memory_items mi
                      LEFT JOIN events src
                        ON src.event_id = mi.source_event_ids[1]
@@ -65,7 +69,8 @@ def _sample(dsn: str, per_kind: int) -> list[dict]:
                     LIMIT %s""",
                 (kind, per_kind),
             ).fetchall()
-            for item_id, project_id, item_kind, content, source_ids, confidence, source_text in rows:
+            for (item_id, project_id, item_kind, content, source_ids, confidence,
+                 source_text, item_indexed, source_indexed) in rows:
                 content = content if isinstance(content, dict) else json.loads(content or "{}")
                 topic = str(content.get("item_key") or "").strip()
                 if len(topic) < 3:
@@ -82,6 +87,8 @@ def _sample(dsn: str, per_kind: int) -> list[dict]:
                     "kind": item_kind,
                     "source_ids": set(source_ids or []),
                     "confidence": float(confidence),
+                    "item_bge_indexed": bool(item_indexed),
+                    "source_bge_indexed": bool(source_indexed),
                     "fts_query": topic[:220],
                     "question": question,
                     # The original user wording is a more realistic query than
@@ -150,6 +157,12 @@ def _evaluate_api(records: list[dict], token: str, *, query_field: str = "questi
     target_ranks: list[int | None] = []
     target_miss_top_scores: list[float] = []
     top_scores: list[float] = []
+    target_miss_by_kind = {kind: 0 for kind in QUESTIONS}
+    target_miss_by_query_length = {"<=160": 0, "161-512": 0, ">512": 0}
+    target_miss_by_confidence = {"<0.95": 0, ">=0.95": 0}
+    target_miss_by_index_state: dict[str, int] = {}
+    target_miss_with_source_hit = 0
+    target_miss_source_rank_buckets = {"top5": 0, "top20": 0, "top50": 0}
     skipped_key = skipped_topic = degraded = project_leaks = 0
     retrieval_paths: dict[str, int] = {}
     length_buckets: dict[str, list[float]] = {}
@@ -195,12 +208,16 @@ def _evaluate_api(records: list[dict], token: str, *, query_field: str = "questi
         if require_item_match and result.get("results"):
             top_scores.append(float(result["results"][0].get("score") or 0))
         target_rank = None
+        source_rank = None
         for rank, hit in enumerate(result.get("results", []), 1):
             if require_item_match:
                 if hit.get("memory_item_id") == record["item_id"]:
                     ranks.append(rank)
                     target_rank = rank
                     break
+                hit_sources = set(hit.get("source_event_ids") or [])
+                if hit.get("event_id") in record["source_ids"] or hit_sources & record["source_ids"]:
+                    source_rank = rank if source_rank is None else source_rank
                 continue
             source_match = bool(record["source_ids"] & set(hit.get("source_event_ids") or []))
             if hit.get("memory_item_id") == record["item_id"] or source_match:
@@ -210,6 +227,24 @@ def _evaluate_api(records: list[dict], token: str, *, query_field: str = "questi
             target_ranks.append(target_rank)
             if target_rank is None and result.get("results"):
                 target_miss_top_scores.append(float(result["results"][0].get("score") or 0))
+            if target_rank is None:
+                target_miss_by_kind[record["kind"]] += 1
+                query_length = len(record[query_field])
+                length_bucket = "<=160" if query_length <= 160 else "161-512" if query_length <= 512 else ">512"
+                target_miss_by_query_length[length_bucket] += 1
+                confidence_bucket = "<0.95" if record["confidence"] < 0.95 else ">=0.95"
+                target_miss_by_confidence[confidence_bucket] += 1
+                index_state = (f"item_bge={record['item_bge_indexed']}"
+                               f"/source_bge={record['source_bge_indexed']}")
+                target_miss_by_index_state[index_state] = (
+                    target_miss_by_index_state.get(index_state, 0) + 1)
+                target_miss_with_source_hit += int(source_rank is not None)
+                if source_rank is not None:
+                    target_miss_source_rank_buckets["top50"] += 1
+                    if source_rank <= 20:
+                        target_miss_source_rank_buckets["top20"] += 1
+                    if source_rank <= 5:
+                        target_miss_source_rank_buckets["top5"] += 1
 
     sorted_times = sorted(times)
     sorted_server = sorted(server_times)
@@ -243,6 +278,14 @@ def _evaluate_api(records: list[dict], token: str, *, query_field: str = "questi
             "target_not_in_top_50": sum(rank is None for rank in target_ranks),
             "target_miss_top_result_score_median": p50(target_miss_top_scores),
             "top_result_score_median": p50(top_scores),
+        } if require_item_match else {}),
+        **({
+            "target_miss_by_kind": target_miss_by_kind,
+            "target_miss_by_query_length": target_miss_by_query_length,
+            "target_miss_by_confidence": target_miss_by_confidence,
+            "target_miss_by_index_state": target_miss_by_index_state,
+            "target_miss_with_source_hit": target_miss_with_source_hit,
+            "target_miss_source_rank_buckets": target_miss_source_rank_buckets,
         } if require_item_match else {}),
     }
 

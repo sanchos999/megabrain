@@ -172,6 +172,23 @@ class HybridRetriever:
           and coalesce(mi.content->>'content_status', '') <> 'REJECTED_EMPTY'
     """
 
+    PROVENANCE_ITEM_SQL = f"""
+        select 'item:' || mi.item_id as key,
+               coalesce(mi.source_event_ids[1], 'memory_item:' || mi.item_id) as event_id,
+               mi.item_id, null::text as session_id, mi.project_id,
+               'MEMORY_ITEM' as event_type, mi.kind as source,
+               mi.valid_from as created_at, {ITEM_TEXT} as text,
+               mi.source_event_ids, mi.confidence, mi.valid_from, mi.valid_to,
+               (mi.valid_to is not null) as superseded
+        from memory_items mi
+        where mi.source_event_ids && %(source_event_ids)s
+          and mi.project_id = %(project_id)s
+          and mi.extractor_type = 'EXPLICIT'
+          and mi.confidence >= 0.9
+          and coalesce(mi.content->>'status', '') not in ('REJECTED','SUPERSEDED')
+          and coalesce(mi.content->>'content_status', '') <> 'REJECTED_EMPTY'
+    """
+
     def __init__(self, cfg: dict | None = None):
         self.cfg = cfg or load_config()
         self._embedder = None
@@ -541,6 +558,24 @@ class HybridRetriever:
                     flags[eid] = entry
         return flags
 
+    def _provenance_items(self, cur, source_event_ids: list[str], project_id: str,
+                          session_id: str | None, at_time: str | None,
+                          at_revision: int | None) -> list[Row]:
+        item_extra, item_params = self._item_where(
+            False, project_id, session_id, at_time, at_revision)
+        params = {
+            "source_event_ids": source_event_ids,
+            "project_id": project_id,
+            "lim": 20,
+            **item_params,
+        }
+        cur.execute(
+            self.PROVENANCE_ITEM_SQL + item_extra
+            + " order by mi.confidence desc, mi.valid_from desc limit %(lim)s",
+            params,
+        )
+        return self._fetch(cur)
+
     # --- public API ------------------------------------------------------
 
     def search(self, query: str, mode: str = "WARM", limit: int = 10,
@@ -632,6 +667,43 @@ class HybridRetriever:
                             project_id, session_id, at_time, at_revision)
                     rrf = self._rrf(event_fts + item_fts, event_vec + item_vec,
                                     max(limit * 3, 20))
+                    event_scores = {
+                        row[1]: score for row, _source, score in rrf
+                        if row[2] is None and row[1]
+                    }
+                    if project_id and event_scores:
+                        missing_source_ids = [
+                            event_id for event_id, _score in sorted(
+                                event_scores.items(), key=lambda pair: -pair[1])[:5]
+                        ]
+                        if missing_source_ids:
+                            companions = self._provenance_items(
+                                cur, missing_source_ids, project_id, session_id,
+                                at_time, at_revision)
+                            candidate_positions = {
+                                row[2]: index for index, (row, _src, _score) in enumerate(rrf)
+                                if row[2] is not None
+                            }
+                            for row in companions:
+                                source_score = max(
+                                    (event_scores[source_id]
+                                     for source_id in (row[9] or [])
+                                     if source_id in event_scores),
+                                    default=0.0,
+                                )
+                                if source_score:
+                                    index = candidate_positions.get(row[2])
+                                    provenance_score = source_score * 1.05
+                                    if index is None:
+                                        candidate_positions[row[2]] = len(rrf)
+                                        rrf.append((row, "PROVENANCE", provenance_score))
+                                    else:
+                                        old_row, old_source, old_score = rrf[index]
+                                        rrf[index] = (
+                                            old_row,
+                                            "BOTH" if old_source != "PROVENANCE" else old_source,
+                                            max(old_score, provenance_score),
+                                        )
                 event_ids = [r[1] for r, _, _ in rrf if r[2] is None and r[1]]
                 flags = self._temporal_flags(cur, event_ids)
         except psycopg.OperationalError:
