@@ -185,7 +185,7 @@ class HybridRetriever:
           and mi.project_id = %(project_id)s
           and mi.extractor_type = 'EXPLICIT'
           and mi.confidence >= 0.9
-          and coalesce(mi.content->>'status', '') not in ('REJECTED','SUPERSEDED')
+          and coalesce(mi.content->>'status', '') <> 'REJECTED'
           and coalesce(mi.content->>'content_status', '') <> 'REJECTED_EMPTY'
     """
 
@@ -569,8 +569,12 @@ class HybridRetriever:
             "lim": 20,
             **item_params,
         }
+        current_status_filter = (
+            " and coalesce(mi.content->>'status', '') <> 'SUPERSEDED'"
+            if at_time is None and at_revision is None else ""
+        )
         cur.execute(
-            self.PROVENANCE_ITEM_SQL + item_extra
+            self.PROVENANCE_ITEM_SQL + current_status_filter + item_extra
             + " order by mi.confidence desc, mi.valid_from desc limit %(lim)s",
             params,
         )

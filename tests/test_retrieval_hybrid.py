@@ -84,9 +84,14 @@ def test_provenance_lookup_keeps_project_and_revision_filters():
     assert "mi.project_id = %(project_id)s" in sql
     assert "mi.valid_from_revision <= %(at_revision)s" in sql
     assert "mi.valid_to_revision > %(at_revision)s" in sql
+    assert "status', '') <> 'SUPERSEDED'" not in sql
     assert params["source_event_ids"] == ["event-a"]
     assert params["project_id"] == "project-a"
     assert params["at_revision"] == 17
+
+    retriever._provenance_items(
+        cursor, ["event-a"], "project-a", None, None, None)
+    assert "status', '') <> 'SUPERSEDED'" in cursor.calls[1][0]
 
 
 def test_fts_bounds_long_query_and_preserves_both_ends():
