@@ -110,6 +110,44 @@ def test_search_evidence_preserves_supersession_time_and_sources(mod):
     assert "source_event_ids=evt_source_1" in rendered
 
 
+def test_prefetch_never_reuses_evidence_for_a_different_query(mod, monkeypatch):
+    provider = mod.MegaBrainProvider()
+    provider._cache["sid"] = (
+        4, "stable capsule", "what failed before", "old query evidence", "project-1",
+    )
+
+    class PendingThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            pass
+
+        def join(self, timeout):
+            assert timeout == 0.1
+
+    monkeypatch.setattr(mod.threading, "Thread", PendingThread)
+    recalled = provider.prefetch("какая ошибка была?", session_id="sid")
+
+    assert recalled == "stable capsule"
+    assert "old query evidence" not in recalled
+
+
+def test_prefetch_reuses_evidence_only_for_normalized_matching_query(mod, monkeypatch):
+    provider = mod.MegaBrainProvider()
+    provider._cache["sid"] = (
+        4, "stable capsule", "какая ошибка была?", "matching evidence", "project-1",
+    )
+
+    def unexpected_thread(**kwargs):
+        raise AssertionError("matching query should use its cached evidence")
+
+    monkeypatch.setattr(mod.threading, "Thread", unexpected_thread)
+    recalled = provider.prefetch("  Какая   ошибка была? ", session_id="sid")
+
+    assert recalled == "stable capsulematching evidence"
+
+
 def test_channel_mapping(mod):
     assert mod._channel_from_kwargs("", "telegram") == "telegram"
     assert mod._channel_from_kwargs("subagent", "") == "subagent"

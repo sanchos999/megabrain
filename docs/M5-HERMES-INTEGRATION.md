@@ -42,8 +42,11 @@ Idempotency по event_id (без дублей).
 resolve project → select mode (NONE/HOT/WARM/DEEP, без LLM) → Context Capsule → inject
 ```
 
-Stable capsule кэшируется по `(project_id, project_revision, token_budget)`
-для сохранения prompt cache; recent delta меняется отдельно.
+Стабильная capsule кэшируется отдельно от query-specific search evidence.
+Evidence инжектируется только для совпадающего нормализованного запроса; при
+смене запроса устаревшие результаты исключаются сразу, capsule возвращается
+без блокировки долгого поиска, а обновление ждёт не более 100 мс. На холодном
+старте прежнее ограничение prefetch — до 1 секунды.
 
 ## Capture
 
@@ -58,5 +61,5 @@ FILE_WRITE/TEST_RESULT/ERROR — derive из `messages` (OpenAI list) в sync_tu
 
 ## Тесты
 
-`tests/test_m5_outbox.py` (8), `tests/test_m5_plugin.py` (7),
+`tests/test_m5_outbox.py` (8), `tests/test_m5_plugin.py` (9),
 `tests/test_m5_consolidation.py` (4).

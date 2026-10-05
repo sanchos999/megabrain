@@ -151,7 +151,8 @@ class MegaBrainProvider(MemoryProvider):
         self._session_id: str = ""
         self._turn_number: int = 0
         self._project_id: str | None = None
-        self._cache: dict[str, tuple] = {}  # key -> (revision, capsule_text)
+        # session -> (revision, stable capsule, evidence query, query evidence, project)
+        self._cache: dict[str, tuple] = {}
         self._last_recall: RecallStatus | None = None
         self._off = False  # memory_off toggle for current session
 
@@ -233,12 +234,16 @@ class MegaBrainProvider(MemoryProvider):
             cap = self._client.get_context(project_id=pid,
                                            token_budget=_budget_for(mode))
             rev = cap.get("revision") or cap.get("project_revision")
-            text = _format_capsule(cap, mode)
+            capsule_text = _format_capsule(cap, mode)
+            evidence_text = ""
+            evidence_query = ""
             if mode in ("WARM", "DEEP"):
                 ev = self._client.memory_search(query, project_id=pid, limit=5,
                                                 mode=mode)
-                text += _format_evidence(ev)
-            self._cache[session_id] = (rev, text, pid)
+                evidence_text = _format_evidence(ev)
+                evidence_query = _normalize_query(query)
+            self._cache[session_id] = (rev, capsule_text, evidence_query,
+                                       evidence_text, pid)
             self._project_id = pid
         except Exception:
             pass  # degraded: no recall, never block
@@ -256,9 +261,23 @@ class MegaBrainProvider(MemoryProvider):
         sid = session_id or self._session_id
         cached = self._cache.get(sid)
         if cached:
-            _, text, _ = cached
+            _, capsule_text, evidence_query, evidence_text, _ = cached
+            mode = select_mode(query)
+            query_key = _normalize_query(query) if mode in ("WARM", "DEEP") else ""
+            if not query_key or query_key == evidence_query:
+                self._last_recall = RecallStatus("megabrain", 1)
+                return capsule_text + (evidence_text if query_key else "")
+            # Never inject search results produced for a different question.
+            # Keep the stable capsule fast while a bounded refresh runs.
+            t = threading.Thread(target=self._warm, args=(query, sid), daemon=True)
+            t.start()
+            t.join(0.1)
+            refreshed = self._cache.get(sid)
+            if refreshed and refreshed[2] == query_key:
+                self._last_recall = RecallStatus("megabrain", 1)
+                return refreshed[1] + refreshed[3]
             self._last_recall = RecallStatus("megabrain", 1)
-            return text
+            return capsule_text
         # cold-start: bounded synchronous fetch (local loopback, LLM-free)
         t = threading.Thread(target=self._warm, args=(query, sid), daemon=True)
         t.start()
@@ -266,7 +285,9 @@ class MegaBrainProvider(MemoryProvider):
         cached = self._cache.get(sid)
         if cached:
             self._last_recall = RecallStatus("megabrain", 1)
-            return cached[1]
+            _, capsule_text, evidence_query, evidence_text, _ = cached
+            query_key = _normalize_query(query) if select_mode(query) in ("WARM", "DEEP") else ""
+            return capsule_text + (evidence_text if query_key == evidence_query else "")
         self._last_recall = None
         return ""
 
@@ -463,6 +484,10 @@ class MegaBrainProvider(MemoryProvider):
 
 def _budget_for(mode: str) -> int:
     return {"NONE": 0, "HOT": 6000, "WARM": 6000, "DEEP": 6000}.get(mode, 6000)
+
+
+def _normalize_query(query: str) -> str:
+    return " ".join((query or "").casefold().split())
 
 
 def _format_capsule(cap: dict, mode: str) -> str:
