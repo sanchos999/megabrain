@@ -351,16 +351,16 @@ judged real-world cases before using it to tune ranking weights.
 high-confidence explicit memories per kind (120 DECISION/CONSTRAINT/TASK
 query pairs). The generated-question diagnostic and production API both
 returned the target at top-1 for 120/120; production API server p50/p95 was
-0.43/1.32 ms, with zero project leaks and vector-degraded queries in this
+0.38/0.92 ms, with zero project leaks and vector-degraded queries in this
 sample. This test derives queries from stored keys and is intentionally treated
 as a smoke/regression check, not a general recall score.
 
 For 46 linked original user messages, the canonical item was top-5 for 45/46
-(97.8%) and top-1 for 45/46; server p50/p95 was 7.55/77.26 ms, with no project
+(97.8%) and top-1 for 45/46; server p50/p95 was 7.53/75.25 ms, with no project
 leaks or vector degradation. The guarded E5 comparison also reached 45/46 and
 its current gate accepted all 46, so E5 still shows no quality advantage over
 BGE and this sample does not justify widening its route. A 240-query RU/EN
-discussion-topic canary reached target top-1 for 240/240 (p50/p95 1.73/5.64 ms).
+discussion-topic canary reached target top-1 for 240/240 (p50/p95 1.42/1.97 ms).
 On 20 paired semantic whitespace-equivalent queries, server p50 was 55.70 ms
 for the first form and 18.79 ms for the normalized repeat; this is a small
 paired cache probe, not an overall request-latency guarantee. These
