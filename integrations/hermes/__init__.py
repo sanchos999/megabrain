@@ -67,9 +67,16 @@ except ModuleNotFoundError:
 
 # --- deterministic mode selector (M5 section 8, no LLM) --------------------
 
-_CONTINUATION = ("продолжаем", "продолжи", "дальше", "что осталось", "на чём остановились")
-_DEEP = ("за всю историю", "в других проектах", "что делали раньше", "как это связано",
-         "что мы делали", "похожее", "аналогичное")
+_CONTINUATION = (
+    "продолжаем", "продолжи", "дальше", "что осталось", "на чём остановились",
+    "continue", "pick up where we left off", "what remains", "where did we stop",
+)
+_DEEP = (
+    "за всю историю", "в других проектах", "что делали раньше", "как это связано",
+    "что мы делали", "похожее", "аналогичное", "throughout history",
+    "across sessions", "across projects", "what did we do before",
+    "how is this related", "similar to before",
+)
 _TRIVIAL_RU = ("привет", "здравствуй", "ок", "да", "нет", "спасибо", "понял",
                "понятно", "хорошо", "ага", "угу", "готово")
 
@@ -84,7 +91,9 @@ def select_mode(query: str) -> str:
         return "HOT"
     # WARM signals: decision/failure/location recall
     warm = ("решили", "решение", "ошибка", "ошибк", "обсуждали", "где", "как настро",
-            "какой", "какие", "что было", "почему")
+            "какой", "какие", "что было", "почему", "what did we decide", "what was the error",
+            "which error", "where did we discuss", "how did we configure", "what did we try",
+            "why did we")
     if any(k in q for k in warm):
         return "WARM"
     return "HOT"  # default: cheap structured context, no deep search
@@ -92,11 +101,19 @@ def select_mode(query: str) -> str:
 
 def classify_memory_intent(query: str) -> str | None:
     q = " ".join((query or "").strip().lower().split())
-    if q in {"продолжаем", "продолжим", "дальше", "давай дальше", "что осталось", "где остановились", "на чем остановились", "continue", "continue working"}:
+    if q in {"продолжаем", "продолжим", "дальше", "давай дальше", "что осталось", "где остановились", "на чем остановились", "continue", "continue working", "pick up where we left off", "what remains", "where did we stop"}:
         return "HOT"
-    if any(x in q for x in ("что решили", "что мы решили", "какая была ошибка", "где обсуждали", "вспомни решение")):
+    if any(x in q for x in (
+        "что решили", "что мы решили", "какая была ошибка", "где обсуждали", "вспомни решение",
+        "what did we decide", "what was the error", "which error", "where did we discuss",
+        "how did we configure", "what did we try", "why did we",
+    )):
         return "WARM"
-    if any(x in q for x in ("за всю историю", "что делали раньше", "в других сессиях", "в других проектах", "как это связано с прошлой работой")):
+    if any(x in q for x in (
+        "за всю историю", "что делали раньше", "в других сессиях", "в других проектах", "как это связано с прошлой работой",
+        "throughout history", "across sessions", "across projects", "what did we do before",
+        "how is this related", "similar to before",
+    )):
         return "DEEP"
     return None
 
