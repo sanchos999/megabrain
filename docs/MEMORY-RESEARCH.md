@@ -21,6 +21,17 @@ uncertainty, and success on later tasks.
   histories and adds tasks such as workflow knowledge, gotchas, changing state,
   and awareness of what the agent does not know. Its scale and web-agent setting
   make it a useful design reference, not a direct MegaBrain score comparison.
+- [MemoryArena (ICML 2026)](https://arxiv.org/abs/2602.16313) evaluates
+  interdependent multi-session tasks where retained experience must change a
+  later action. Its key lesson is that memory-QA accuracy alone does not show
+  that memory improves task success.
+- An August 2026 [matched MemoryLake comparison on MemoryArena](https://arxiv.org/abs/2608.13883)
+  reported a workload-dependent result: structured tracks of conclusions,
+  supporting evidence, and reusable experience helped on some reasoning and
+  progressive-retrieval tasks, while long context was stronger on some
+  high-fidelity planning/replay metrics. Small/partial samples, overlapping
+  intervals, resource mismatches, and proprietary implementation mean this is
+  a useful design/evaluation clue—not proof of a universal best system.
 
 ## What recent architectures suggest
 
@@ -29,6 +40,17 @@ uncertainty, and success on later tasks.
   temporal/entity structure with parallel lexical and vector retrieval. Its
   reported benchmark scores are author-reported and are not directly comparable
   to MegaBrain's current proxy evaluations.
+- [APEX-MEM (ACL 2026)](https://aclanthology.org/2026.acl-long.749/) emphasizes
+  entity-centered temporal events, append-only history, and resolving conflicts
+  at retrieval time. MegaBrain already keeps source events and versioned facts;
+  its production temporal probe validates ordinary nonzero intervals, but
+  same-instant replacements still need a deterministic sequence/tie-break
+  representation before the oldest state can be recalled at a sub-instant.
+- [LightMem (ACL 2026)](https://aclanthology.org/2026.acl-long.588/) separates
+  online retrieval/writing from bounded-cost offline consolidation and uses a
+  staged short-/mid-/long-term design. This supports keeping expensive
+  consolidation off Hermes' latency-critical path; it does not imply that
+  MegaBrain should add another model or duplicate its existing workers.
 - [A-Mem (NeurIPS 2025)](https://proceedings.neurips.cc/paper_files/paper/2025/hash/19909c36f51abc4856b4560aff3d36d6-Abstract-Conference.html)
   explores linked, evolving memory notes. This is a promising research direction,
   but automatic rewriting/linking should not replace immutable source events and
@@ -57,3 +79,45 @@ for provenance, temporal metadata, query-scoped evidence, and Russian/English
 cross-session recall routing. This does not establish that MegaBrain is “better
 than human memory”; that claim needs an independently designed, task-based
 comparison.
+
+## Recommended next improvement (evidence-first)
+
+Do not replace PostgreSQL/pgvector with a graph database or copy a paper's
+reported benchmark score. MegaBrain already has the main production patterns
+that recur in recent systems: raw episodes plus canonical memories, lexical and
+vector retrieval, temporal versions, provenance, asynchronous consolidation,
+and scoped retrieval. The high-value gap is a reproducible, independently
+judged evaluation and a measured last-mile retrieval policy:
+
+1. Add an isolated LongMemEval-compatible harness (including questions that
+   require abstention, updates, temporal reasoning, and multi-session joins),
+   while preserving benchmark licenses and never loading benchmark data into
+   production memory. Report retrieval Recall@k/MRR separately from answer
+   accuracy, abstention quality, latency, and token budget.
+2. Add a small hand-labeled bilingual MegaBrain set drawn from real query
+   patterns, with sensitive text kept local and aggregate-only reports. Split
+   by source conversation/time to avoid query-memory leakage. Include hard
+   negatives and multi-hop questions; the current generated-key probes are
+   smoke checks only.
+3. Use staged retrieval: fast exact/key and FTS routes first, then hybrid
+   semantic retrieval; only invoke a bounded second-stage reranker or
+   decomposition when the first-stage evidence is weak or the question is
+   explicitly multi-part. Gate any route change on paired recall, abstention,
+   project-isolation, and p95 latency—never on speed alone.
+4. Improve temporal ties with an explicit event sequence/observed-at ordering,
+   keeping valid-time and recorded-time distinct. Backfill must be additive and
+   reversible; do not infer an ordering for same-time legacy events without
+   provenance.
+5. Test whether retrieved memories improve a downstream multi-step action
+   (runbook/decision continuation) versus a no-memory baseline. Track task
+   completion and harmful/stale-memory regressions.
+6. Keep reusable procedural lessons and confirmed conclusions addressable as
+   separate retrieval tracks, but fetch raw episodes as evidence on demand.
+   Compare this policy against the current unified ranking before altering
+   storage; the recent matched MemoryArena results suggest workload-dependent
+   tradeoffs, not a need to replace the existing schema with a graph.
+
+These are hypotheses and a validation plan, not claims that a new design is
+already better. A defensible improvement is one that beats the current
+production baseline on held-out, independently labeled cases while preserving
+isolation and reliability.
