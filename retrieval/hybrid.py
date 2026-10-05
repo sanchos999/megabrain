@@ -23,6 +23,17 @@ from core.memory_item_text import MEMORY_ITEM_TEXT_SQL
 RRF_K = 60
 EMBEDDING_MODEL = "bge-m3-int8-onnx"
 EMBEDDING_DIM = 1024
+MAX_QUERY_CHARS = 512
+
+
+def _bounded_query(query: str) -> str:
+    """Bound long query processing while retaining both beginning and ending."""
+    normalized = " ".join(str(query).split())
+    if len(normalized) <= MAX_QUERY_CHARS:
+        return normalized
+    head_chars = MAX_QUERY_CHARS // 2
+    tail_chars = MAX_QUERY_CHARS - head_chars - 1
+    return f"{normalized[:head_chars].rstrip()} {normalized[-tail_chars:].lstrip()}"
 MAX_DOC_CHARS = 4000
 MAX_LEN = 512
 ITEM_WEIGHT = 1.35
@@ -217,8 +228,8 @@ class HybridRetriever:
         # The tokenizer treats runs of whitespace as separators. Canonicalize
         # before both caching and inference so transport formatting (newlines,
         # tabs, repeated spaces) does not trigger an identical ONNX pass.
-        normalized_query = " ".join(str(query).split())
-        cache_key = normalized_query[:MAX_DOC_CHARS]
+        normalized_query = _bounded_query(query)
+        cache_key = normalized_query
         now = time.monotonic()
         with self._query_cache_lock:
             cached = self._query_cache.get(cache_key)
@@ -253,7 +264,7 @@ class HybridRetriever:
             query_max_tokens = max(
                 64, min(MAX_LEN, int(self.cfg.get("retrieval_query_max_tokens", 128))))
             v = self._embedder.encode(
-                [normalized_query[:MAX_DOC_CHARS]], max_length=query_max_tokens)
+                [normalized_query], max_length=query_max_tokens)
             if v is None or len(v) == 0:
                 self._local.vector_error = "empty_embedding"
                 with self._query_cache_lock:
@@ -346,7 +357,10 @@ class HybridRetriever:
         event_vec_rows: list[Row] = []
         item_vec_rows: list[Row] = []
         event_extra, structural = self._structural_where(deep, project_id, session_id)
-        fts_params = {"q": query, "lim": limit * 3, **structural}
+        # Bound PostgreSQL's lexical parsing cost for pasted conversation-sized
+        # queries. Semantic embedding still receives the full original query.
+        fts_query = _bounded_query(query)
+        fts_params = {"q": fts_query, "lim": limit * 3, **structural}
         if at_time:
             fts_params["at"] = at_time
             event_extra += " and e.created_at <= %(at)s"
@@ -359,7 +373,7 @@ class HybridRetriever:
 
         item_extra, item_params = self._item_where(
             deep, project_id, session_id, at_time, at_revision)
-        item_fts_params = {"q": query, "lim": limit * 3, **item_params}
+        item_fts_params = {"q": fts_query, "lim": limit * 3, **item_params}
         cur.execute(self.ITEM_FTS_SQL + item_extra + " order by mi.valid_from desc limit %(lim)s",
                     item_fts_params)
         item_fts_rows = self._fetch(cur)

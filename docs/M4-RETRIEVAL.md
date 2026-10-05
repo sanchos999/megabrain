@@ -53,6 +53,9 @@ Similarity НЕ определяет current truth. После retrieval:
   (FTS и VECTOR), историческое состояние возвращается как есть
 - revision snapshot (at_revision): per-project event ordering selects the
   state at an exact project revision, even when event timestamps are equal
+- oversized semantic/FTS input is bounded to 512 normalized characters (head
+  and tail) to cap tokenizer and lexical-query work; exact routing and final
+  reranking still use the original query
 
 `at_revision` is project-scoped and uses the immutable `events.project_revision`
 sequence independently from wall-clock timestamps. Canonical items carry

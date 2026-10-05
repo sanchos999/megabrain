@@ -3,7 +3,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
-from retrieval.hybrid import HybridRetriever
+from retrieval.hybrid import HybridRetriever, _bounded_query
 from scripts.embedding_worker import _vector_values, fetch_item_batch
 
 
@@ -70,6 +70,28 @@ def test_revision_snapshot_requires_project_scope():
         assert "project_id" in str(error)
     else:
         raise AssertionError("revision snapshots must be project-scoped")
+
+
+def test_fts_bounds_long_query_and_preserves_both_ends():
+    query = "memory retrieval context " * 40
+    retriever = HybridRetriever({"retrieval_query_cache_max": 0})
+    embedded = []
+
+    def encode(value):
+        embedded.append(value)
+        return [0.0] * 1024
+
+    retriever._encode_query = encode
+    cursor = _RecordingCursor()
+
+    retriever._run_legs(cursor, query, 5, False, "project-a", None, None)
+
+    fts_queries = [params["q"] for sql, params in cursor.calls
+                   if "e.fts" in sql or "to_tsvector" in sql]
+    assert len(fts_queries) == 2
+    assert all(value == _bounded_query(query) for value in fts_queries)
+    assert len(fts_queries[0]) == 512
+    assert embedded == [query]
 
 
 def test_as_of_exact_key_filter_accepts_historical_versions():
@@ -156,7 +178,7 @@ def test_query_embedding_cache_normalizes_whitespace_before_inference():
     }
 
 
-def test_long_query_embedding_is_capped_but_full_text_is_given_to_encoder():
+def test_long_query_embedding_uses_bounded_head_and_tail():
     class FakeVector:
         def tolist(self):
             return [0.25] * 1024
@@ -174,10 +196,10 @@ def test_long_query_embedding_is_capped_but_full_text_is_given_to_encoder():
     retriever._embedder = FakeEmbedder()
 
     assert retriever._encode_query(query) == [0.25] * 1024
-    assert retriever._embedder.calls == [( [" ".join(query.split())], 128)]
+    assert retriever._embedder.calls == [([_bounded_query(query)], 128)]
 
 
-def test_query_token_cap_does_not_truncate_full_text_search_input():
+def test_long_query_bounds_fts_and_embedding_input():
     class FakeVector:
         def tolist(self):
             return [0.25] * 1024
@@ -197,8 +219,13 @@ def test_query_token_cap_does_not_truncate_full_text_search_input():
 
     retriever._run_legs(cursor, query, 5, False, "project-a", None, None)
 
-    assert cursor.calls[0][1]["q"] == query
-    assert retriever._embedder.calls == [( [" ".join(query.split())], 128)]
+    bounded = _bounded_query(query)
+    assert len(bounded) <= 512
+    assert bounded.startswith(" ".join(query.split())[:256].rstrip())
+    assert bounded.endswith(" ".join(query.split())[-255:].lstrip())
+    assert cursor.calls[0][1]["q"] == bounded
+    assert cursor.calls[1][1]["q"] == bounded
+    assert retriever._embedder.calls == [( [bounded], 128)]
 
 
 def test_simultaneous_identical_query_embeddings_are_single_flight():

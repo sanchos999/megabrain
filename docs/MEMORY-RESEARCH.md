@@ -143,3 +143,12 @@ isolation and reliability.
   PostgreSQL transactions before waiting. The live health check reports schema
   17 and healthy API/worker dependencies; the observed idle-in-transaction
   count after restart was zero.
+- A 120-memory live proxy run returned target top-1 for all generated
+  topic/key questions. On 46 original source-message queries, canonical target
+  hit@5 was 45/46, with no project leaks or degraded vector queries. A
+  head+tail 512-character query representation preserved that same 45/46
+  result; only FTS/embedding input is bounded, while the original query remains
+  available to exact routing and reranking. A single cold/long-query latency
+  outlier above 100 ms remains and is not claimed as solved. E5 stayed disabled:
+  its stricter gate accepted only 10/46 source queries in this diagnostic, and
+  E5 encoding itself was slower than the warm BGE fallback.

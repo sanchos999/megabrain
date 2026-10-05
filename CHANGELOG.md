@@ -20,11 +20,17 @@
 - E5 shadow-indexer теперь завершает транзакцию сразу после чтения batch,
   до ожидания или вызова embedding API; idle-опросы больше не удерживают
   снимок PostgreSQL и не мешают миграциям.
+- Длинный поисковый ввод нормализуется и ограничивается 512 символами с
+  сохранением начала и конца перед FTS/кодированием запроса; полный ввод
+  по-прежнему доступен exact-маршрутизации и reranking.
 
 ### Fixed (English)
 - E5 shadow-indexer now commits immediately after reading a batch, before
   sleeping or calling the embedding API, avoiding idle PostgreSQL snapshots
   that can obstruct migrations.
+- Long retrieval inputs are normalized and bounded to 512 characters, keeping
+  both head and tail for FTS/embedding; exact routing and reranking still see
+  the original request.
 
 ## [0.2.1] - 2026-10-03
 
