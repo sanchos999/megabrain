@@ -380,19 +380,21 @@ answer. No cutoff is enabled from this tiny synthetic probe.
 
 The new privacy-safe `scripts/live_temporal_memory_eval.py` samples linked,
 high-confidence explicit supersession pairs and checks both current lookup and
-lookup one microsecond before the old version's `valid_to`. At this probe's
-snapshot, among 253 eligible pairs, 65 have a positive validity interval; 188 have `valid_from >= valid_to`
-and therefore were never valid at any instant under the stored timestamps.
-Those empty intervals are reported separately, not miscounted as retrieval
-misses. Repairing their timestamps would require deciding whether these records
-represent effective-world time or when MegaBrain learned the fact; the probe
-does not rewrite production data.
+lookup one microsecond before the old version's `valid_to`. At the latest
+read-only snapshot, among 254 eligible pairs, 65 have a positive validity
+interval and 189 have `valid_from == valid_to` (zero negative intervals).
+These zero-length intervals are not historical recall misses: the stored
+effective timestamps place old and replacement versions at the same instant,
+so the old version had no representable positive-duration interval. The probe
+reports them separately and does not rewrite production data. Recovering a
+within-instant order would require an explicit sequence/observation-time tie
+break in the memory timeline.
 
 On 40 sampled pairs with a real validity interval, current lookup returned the
 new item at top-1 for 40/40, and as-of lookup returned the old item at top-1
 for 40/40. There were no future-version results, temporal violations, project
 leaks, or vector degradation. Both paths used exact-topic retrieval; current
-and historical server p50/p95 was 0.47/0.81 ms and 0.48/0.73 ms respectively
+and historical server p50/p95 was 0.39/0.68 ms and 0.40/0.67 ms respectively
 on the repeated warm probe.
 This is a targeted regression
 probe over explicit keyed memories, not a substitute for general temporal QA.
