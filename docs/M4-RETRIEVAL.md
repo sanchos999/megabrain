@@ -372,8 +372,8 @@ evaluation.
 
 The new privacy-safe `scripts/live_temporal_memory_eval.py` samples linked,
 high-confidence explicit supersession pairs and checks both current lookup and
-lookup one microsecond before the old version's `valid_to`. At the evaluation
-snapshot, among 252 eligible pairs, 65 have a positive validity interval; 187 have `valid_from >= valid_to`
+lookup one microsecond before the old version's `valid_to`. At this probe's
+snapshot, among 253 eligible pairs, 65 have a positive validity interval; 188 have `valid_from >= valid_to`
 and therefore were never valid at any instant under the stored timestamps.
 Those empty intervals are reported separately, not miscounted as retrieval
 misses. Repairing their timestamps would require deciding whether these records
@@ -384,6 +384,7 @@ On 40 sampled pairs with a real validity interval, current lookup returned the
 new item at top-1 for 40/40, and as-of lookup returned the old item at top-1
 for 40/40. There were no future-version results, temporal violations, project
 leaks, or vector degradation. Both paths used exact-topic retrieval; current
-and historical server p50/p95 was 0.48/19.78 ms and 0.48/1.41 ms respectively.
+and historical server p50/p95 was 0.47/0.81 ms and 0.48/0.73 ms respectively
+on the repeated warm probe.
 This is a targeted regression
 probe over explicit keyed memories, not a substitute for general temporal QA.

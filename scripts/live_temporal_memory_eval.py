@@ -38,6 +38,10 @@ def _interval_counts(dsn: str) -> tuple[int, int, int]:
                   AND old.extractor_type='EXPLICIT' AND new.extractor_type='EXPLICIT'
                   AND old.confidence >= 0.9 AND new.confidence >= 0.9
                   AND old.kind=new.kind AND old.kind IN ('DECISION','CONSTRAINT','TASK')
+                  AND coalesce(old.content->>'status','') <> 'REJECTED'
+                  AND coalesce(new.content->>'status','') NOT IN ('REJECTED','SUPERSEDED')
+                  AND coalesce(old.content->>'content_status','') <> 'REJECTED_EMPTY'
+                  AND coalesce(new.content->>'content_status','') <> 'REJECTED_EMPTY'
                   AND old.content->>'item_key' IS NOT NULL
                   AND old.content->>'item_key'=new.content->>'item_key'"""
         ).fetchone()
@@ -56,6 +60,10 @@ def _sample(dsn: str, limit: int) -> list[dict]:
                   AND old.extractor_type='EXPLICIT' AND new.extractor_type='EXPLICIT'
                   AND old.confidence >= 0.9 AND new.confidence >= 0.9
                   AND old.kind=new.kind AND old.kind IN ('DECISION','CONSTRAINT','TASK')
+                  AND coalesce(old.content->>'status','') <> 'REJECTED'
+                  AND coalesce(new.content->>'status','') NOT IN ('REJECTED','SUPERSEDED')
+                  AND coalesce(old.content->>'content_status','') <> 'REJECTED_EMPTY'
+                  AND coalesce(new.content->>'content_status','') <> 'REJECTED_EMPTY'
                   AND old.content->>'item_key' IS NOT NULL
                   AND old.content->>'item_key'=new.content->>'item_key'
                   AND old.valid_from < old.valid_to
