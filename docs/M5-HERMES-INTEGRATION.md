@@ -20,8 +20,11 @@ canonical extension-точка Hermes). Активация: `memory.provider: me
 | События | `integrations/hermes/events.py` | детерминированные event builders |
 | Плагин | `~/.hermes/plugins/megabrain/__init__.py` | MemoryProvider: capture + prefetch + tools |
 
-Клиент в плагине — byte-identical vendored-копия (`scripts/sync_plugin.py`,
-`events.py` → `mb_events.py` во избежание коллизии с пакетом `events`).
+Клиентские модули синхронизируются в vendored-копию скриптом
+`scripts/sync_plugin.py` (`events.py` → `mb_events.py` во избежание коллизии
+с пакетом `events`). Сам `__init__.py` устанавливается отдельно: runtime-копии
+могут содержать совместимые с окружением Hermes shim-изменения, поэтому их
+нельзя перезаписывать скриптом vendoring клиентских модулей.
 
 ## Write path (неблокирующий)
 
@@ -55,5 +58,5 @@ FILE_WRITE/TEST_RESULT/ERROR — derive из `messages` (OpenAI list) в sync_tu
 
 ## Тесты
 
-`tests/test_m5_outbox.py` (8), `tests/test_m5_plugin.py` (4),
+`tests/test_m5_outbox.py` (8), `tests/test_m5_plugin.py` (7),
 `tests/test_m5_consolidation.py` (4).
