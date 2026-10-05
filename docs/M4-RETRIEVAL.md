@@ -368,6 +368,14 @@ memory-derived samples retain lexical overlap and cannot replace independent
 human labels, temporal-update/abstention cases, or downstream task-success
 evaluation.
 
+An abstention smoke probe issued 12 synthetic nonce topics known not to be in
+the selected project. The API returned ranked candidates for all 12, with a
+top score of 0.020455; it did not return empty result sets. This confirms that
+“results returned” and the numeric ranking score are not proof of support. The
+Hermes tool instructions now say that `score` is a ranking value, not a
+probability, and require checking whether evidence actually supports the
+answer. No cutoff is enabled from this tiny synthetic probe.
+
 ## Temporal update/as-of probe (2026-10-05)
 
 The new privacy-safe `scripts/live_temporal_memory_eval.py` samples linked,
