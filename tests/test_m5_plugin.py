@@ -48,6 +48,7 @@ def test_select_mode(mod):
     assert mod.select_mode("что мы решили") == "WARM"
     assert mod.select_mode("за всю историю") == "DEEP"
     assert mod.select_mode("в других проектах") == "DEEP"
+    assert mod.select_mode("Что происходило в других сессиях?") == "DEEP"
     assert mod.select_mode("What did we decide about Redis?") == "WARM"
     assert mod.select_mode("What did we do before across sessions?") == "DEEP"
     assert mod.select_mode("Pick up where we left off") == "HOT"

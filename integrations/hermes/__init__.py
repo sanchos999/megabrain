@@ -72,7 +72,7 @@ _CONTINUATION = (
     "continue", "pick up where we left off", "what remains", "where did we stop",
 )
 _DEEP = (
-    "за всю историю", "в других проектах", "что делали раньше", "как это связано",
+    "за всю историю", "в других проектах", "в других сессиях", "что делали раньше", "как это связано",
     "что мы делали", "похожее", "аналогичное", "throughout history",
     "across sessions", "across projects", "what did we do before",
     "how is this related", "similar to before",
