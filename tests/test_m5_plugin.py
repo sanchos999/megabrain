@@ -191,3 +191,12 @@ def test_derive_no_duplicate_event_ids(mod):
     evs = mod._derive_tool_events("s1", messages, None, "cli")
     ids = [e["event_id"] for e in evs if e["event_type"] == "TOOL_CALL"]
     assert len(ids) == len(set(ids))  # dedup identical calls
+
+
+def test_tool_result_id_includes_error_status(mod):
+    success = mod.E.tool_result("session-1", "read_file", "same result", is_error=False)
+    error = mod.E.tool_result("session-1", "read_file", "same result", is_error=True)
+    repeated_error = mod.E.tool_result("session-1", "read_file", "same result", is_error=True)
+
+    assert success["event_id"] != error["event_id"]
+    assert error["event_id"] == repeated_error["event_id"]

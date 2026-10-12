@@ -60,7 +60,10 @@ except ModuleNotFoundError:
     class MemoryProvider:
         pass
     class RecallStatus:
-        pass
+        def __init__(self, provider_label: str, count: int, glyph: str = "🧠"):
+            self.provider_label = provider_label
+            self.count = count
+            self.glyph = glyph
     def is_trivial_prompt(value):
         return False
 

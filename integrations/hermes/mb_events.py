@@ -81,7 +81,9 @@ def tool_call(session_id: str, tool_name: str, args: dict, *, project_id=None,
 
 def tool_result(session_id: str, tool_name: str, result: str, *, project_id=None,
                 turn_id=None, channel="cli", is_error=False) -> dict:
-    eid = _event_id("TOOL_RESULT", session_id, tool_name, result)
+    is_error = bool(is_error)
+    eid = _event_id("TOOL_RESULT", session_id, tool_name, result,
+                    "error" if is_error else "success")
     return base("TOOL_RESULT", session_id, turn_id=turn_id, channel=channel,
                 project_id=project_id, event_id=eid,
                 payload={"tool": tool_name, "result": result,
