@@ -6,6 +6,7 @@ vendored copy in $HERMES_HOME/plugins/megabrain/. Run from megabrain root:
 """
 from __future__ import annotations
 
+import argparse
 import shutil
 import sys
 from pathlib import Path
@@ -15,6 +16,9 @@ SRC = ROOT / "integrations" / "hermes"
 # vendored name -> canonical name. events.py is renamed to mb_events.py in the
 # plugin dir to avoid colliding with megabrain's own `events` package.
 MODULES = {
+    "__init__.py": "__init__.py",
+    "README.md": "README.md",
+    "plugin.yaml": "plugin.yaml",
     "megabrain_client.py": "megabrain_client.py",
     "outbox.py": "outbox.py",
     "sender.py": "sender.py",
@@ -23,7 +27,12 @@ MODULES = {
 
 
 def main() -> int:
-    hermes_home = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else Path.home() / ".hermes"
+    parser = argparse.ArgumentParser(description="Sync MegaBrain Hermes plugin files")
+    parser.add_argument("hermes_home_positional", nargs="?", help="Hermes home (legacy positional form)")
+    parser.add_argument("--hermes-home", dest="hermes_home_option", help="Hermes home directory")
+    args = parser.parse_args()
+    hermes_home_value = args.hermes_home_option or args.hermes_home_positional
+    hermes_home = Path(hermes_home_value).expanduser() if hermes_home_value else Path.home() / ".hermes"
     dst = hermes_home / "plugins" / "megabrain"
     dst.mkdir(parents=True, exist_ok=True)
     for vendored, canonical in MODULES.items():

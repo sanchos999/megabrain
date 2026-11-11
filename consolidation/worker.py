@@ -33,6 +33,7 @@ from storage.pg import EXPERIENCE_KINDS, Postgres
 
 ROUTER_URL = os.environ.get("MEGABRAIN_ROUTER_URL", "http://127.0.0.1:4100")
 ROUTER_API_KEY = os.environ.get("MODEL_ROUTER_API_KEY", "")
+ROUTER_CLIENT_ID = os.environ.get("MEGABRAIN_ROUTER_CLIENT_ID", "megabrain")
 MODEL = os.environ.get("MEGABRAIN_CONSOLIDATION_MODEL", "main-auto")
 HEAVY_MODEL = os.environ.get("MEGABRAIN_CONSOLIDATION_HEAVY_MODEL", "router-memory-heavy")
 TASK_CLASS = "SUMMARIZE"
@@ -501,7 +502,7 @@ class ConsolidationWorker:
             ROUTER_URL + "/v1/chat/completions",
             data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json", "x-hermes-task-class": TASK_CLASS,
-                     "x-gateway-client": "megabrain"},
+                     "x-router-client": ROUTER_CLIENT_ID},
             method="POST",
         )
         if ROUTER_API_KEY:

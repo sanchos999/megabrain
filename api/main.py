@@ -420,6 +420,12 @@ class EmbeddingBatchIn(BaseModel):
     texts: list[str] = Field(min_length=1, max_length=8)
 
 
+class OpenAIEmbeddingIn(BaseModel):
+    input: str | list[str]
+    model: str = "bge-m3-int8-onnx"
+    encoding_format: Literal["float"] = "float"
+
+
 class E5EmbeddingBatchIn(BaseModel):
     texts: list[str] = Field(min_length=1, max_length=8)
     kind: Literal["query", "passage"]
@@ -442,6 +448,39 @@ async def internal_embeddings(body: EmbeddingBatchIn, request: Request):
 
     vectors = await run_in_threadpool(_get_retriever().encode_documents, body.texts)
     return {"model_version": EMBEDDING_MODEL_VERSION, "vectors": vectors}
+
+
+@app.post("/v1/embeddings")
+async def openai_compatible_embeddings(body: OpenAIEmbeddingIn, request: Request):
+    """Loopback-only OpenAI-compatible adapter for OpenClaw memory search."""
+    client = request.client
+    try:
+        is_loopback = bool(client and ip_address(client.host).is_loopback)
+    except ValueError:
+        is_loopback = False
+    if not is_loopback:
+        raise HTTPException(status_code=403, detail="loopback clients only")
+
+    texts = [body.input] if isinstance(body.input, str) else body.input
+    if not texts or len(texts) > 256:
+        raise HTTPException(status_code=422, detail="input must contain 1 to 256 texts")
+    if any(not text.strip() or len(text) > 4000 for text in texts):
+        raise HTTPException(status_code=422, detail="texts must be non-empty and at most 4000 chars")
+
+    vectors = []
+    for offset in range(0, len(texts), 8):
+        batch = await run_in_threadpool(
+            _get_retriever().encode_documents, texts[offset:offset + 8])
+        vectors.extend(batch)
+    return {
+        "object": "list",
+        "data": [
+            {"object": "embedding", "index": i,
+             "embedding": [float(value) for value in vector]}
+            for i, vector in enumerate(vectors)
+        ],
+        "model": body.model,
+    }
 
 
 @app.post("/v1/internal/e5-embeddings", dependencies=[Depends(require_auth)])
@@ -507,6 +546,17 @@ async def memory_search(s: MemorySearchIn):
         return {"query": s.query, "mode": "HOT",
                 "project_id": s.project_id,
                 "capsule": cap, "retrieval_source": "HOT"}
+
+    # WARM / DEEP retrieval must always be project-scoped. An omitted project
+    # used to make the vector leg search every tenant, including unattributed
+    # legacy events. Resolve only an explicit session; otherwise fail closed.
+    if not s.project_id:
+        resolved = STATE["resolver"].resolve(session_id=s.session_id, query=s.query)
+        s.project_id = resolved.get("project_id")
+    if not s.project_id:
+        raise HTTPException(status_code=422, detail="project_id required for scoped memory search")
+    if STATE["pg"].get_project(s.project_id) is None:
+        raise HTTPException(status_code=404, detail="project not found")
 
     # WARM / DEEP
     res = await run_in_threadpool(

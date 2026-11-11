@@ -104,7 +104,7 @@ class HybridRetriever:
         from memory_embeddings me
         join events e on e.event_id = me.event_id
         where me.model_version = %(mv)s and me.dimension = %(dim)s
-          and (%(project_id)s::text is null or me.project_id = %(project_id)s or me.project_id is null)
+          and (%(project_id)s::text is null or (me.project_id = %(project_id)s and e.project_id = %(project_id)s))
           and me.embedding <=> %(vec)s::vector < 0.98
     """
 

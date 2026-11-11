@@ -26,7 +26,7 @@ payload_hash — 400.
 
 ## Event types
 
-USER_MESSAGE, ASSISTANT_MESSAGE, TOOL_CALL, TOOL_RESULT,
+USER_MESSAGE, ASSISTANT_MESSAGE, MEMORY, TOOL_CALL, TOOL_RESULT,
 SHELL_COMMAND, SHELL_RESULT, FILE_READ, FILE_WRITE, FILE_DIFF,
 TEST_STARTED, TEST_RESULT, ERROR, DECISION, CONSTRAINT, TASK_UPDATE,
 TURN_STARTED, TURN_COMPLETED, TURN_ABORTED.
@@ -34,6 +34,8 @@ TURN_STARTED, TURN_COMPLETED, TURN_ABORTED.
 Нерелевантные поля не требуются.
 
 ## Структурированные события (EXPLICIT extractor)
+
+- MEMORY: общая запись агента; сохраняется как исходное событие и не становится автоматически структурированным memory_item.
 
 - DECISION: payload {item_key, text, confidence?} → memory_items kind=DECISION
 - CONSTRAINT: payload {item_key, text} → kind=CONSTRAINT
