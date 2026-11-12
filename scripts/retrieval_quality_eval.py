@@ -167,7 +167,7 @@ def _metrics(cases: list[dict]) -> dict:
             ndcgs.append(dcg / ideal if ideal else 0.0)
         if case.get("project_id"):
             leaks += sum(1 for project_id in case["result_projects"]
-                         if project_id != case["project_id"])
+                         if project_id not in (None, case["project_id"]))
     return {
         "queries_scored": len(recalls),
         "recall_at_5": round(sum(recalls) / len(recalls), 4) if recalls else 0,

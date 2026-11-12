@@ -3,7 +3,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
-from retrieval.hybrid import HybridRetriever, _bounded_query
+import psycopg
+
+from retrieval.hybrid import (
+    HybridRetriever,
+    MAX_EMBED_QUERY_CHARS,
+    _bounded_embedding_query,
+    _bounded_query,
+)
 from scripts.embedding_worker import _vector_values, fetch_item_batch
 
 
@@ -11,7 +18,7 @@ class _RecordingCursor:
     def __init__(self):
         self.calls = []
 
-    def execute(self, sql, params):
+    def execute(self, sql, params, **kwargs):
         self.calls.append((sql, params))
 
     def fetchall(self):
@@ -72,6 +79,35 @@ def test_revision_snapshot_requires_project_scope():
         raise AssertionError("revision snapshots must be project-scoped")
 
 
+def test_project_scoped_event_search_includes_only_unassigned_shared_events():
+    event_extra, event_params = HybridRetriever._structural_where(
+        False, "project-a", None)
+    item_extra, item_params = HybridRetriever._item_where(
+        False, "project-a", None, None)
+    vector_sql = HybridRetriever.VEC_SQL.lower()
+
+    assert "e.project_id is null or e.project_id = %(project_id)s" in event_extra.lower()
+    assert "me.project_id = %(project_id)s and e.project_id = %(project_id)s" in vector_sql
+    assert "me.project_id is null and e.project_id is null" in vector_sql
+    assert "mi.project_id = %(project_id)s" in item_extra
+    assert "mi.project_id is null" not in item_extra
+    assert event_params["project_id"] == item_params["project_id"] == "project-a"
+
+
+def test_memory_item_status_is_selected_in_existing_search_legs():
+    item_sql = (
+        HybridRetriever.ITEM_FTS_SQL,
+        HybridRetriever.ITEM_VEC_SQL,
+        HybridRetriever.ITEM_VEC_UNSCOPED_SQL,
+        HybridRetriever.E5_ITEM_VEC_SQL,
+        HybridRetriever.ITEM_KEY_SQL,
+        HybridRetriever.PROVENANCE_ITEM_SQL,
+    )
+    assert all("mi.content->>'status' as memory_item_status" in sql for sql in item_sql)
+    assert "null::text as memory_item_status" in HybridRetriever.FTS_SQL
+    assert "null::text as memory_item_status" in HybridRetriever.VEC_SQL
+
+
 def test_provenance_lookup_keeps_project_and_revision_filters():
     retriever = HybridRetriever()
     cursor = _RecordingCursor()
@@ -112,8 +148,51 @@ def test_fts_bounds_long_query_and_preserves_both_ends():
                    if "e.fts" in sql or "to_tsvector" in sql]
     assert len(fts_queries) == 2
     assert all(value == _bounded_query(query) for value in fts_queries)
-    assert len(fts_queries[0]) == 512
+    assert len(fts_queries[0]) == 256
     assert embedded == [query]
+
+
+def test_tsquery_parser_fault_retries_event_and_item_fts_as_plain_text():
+    class TsqueryFaultCursor(_RecordingCursor):
+        def execute(self, sql, params, **kwargs):
+            self.calls.append((sql, params))
+            if "websearch_to_tsquery(" in sql:
+                error_type = psycopg.errors.lookup("XX000")
+                raise error_type("tsquery parser failure")
+
+    retriever = HybridRetriever({"retrieval_query_cache_max": 0})
+    retriever._encode_query = lambda _query: None
+    cursor = TsqueryFaultCursor()
+
+    retriever._run_legs(cursor, "unusual pasted source text", 5, False,
+                        "project-a", None, None)
+
+    assert len(cursor.calls) == 4
+    assert "websearch_to_tsquery(" in cursor.calls[0][0]
+    assert "plainto_tsquery(" in cursor.calls[1][0]
+    assert "websearch_to_tsquery(" in cursor.calls[2][0]
+    assert "plainto_tsquery(" in cursor.calls[3][0]
+
+
+def test_non_tsquery_internal_fts_error_is_not_hidden():
+    class OtherInternalFaultCursor(_RecordingCursor):
+        def execute(self, sql, params, **kwargs):
+            self.calls.append((sql, params))
+            error_type = psycopg.errors.lookup("XX000")
+            raise error_type("unrelated internal failure")
+
+    retriever = HybridRetriever({"retrieval_query_cache_max": 0})
+    cursor = OtherInternalFaultCursor()
+
+    try:
+        retriever._run_legs(cursor, "ordinary text", 5, False,
+                            "project-a", None, None)
+    except psycopg.Error as error:
+        assert error.sqlstate == "XX000"
+    else:
+        raise AssertionError("unrelated internal errors must remain visible")
+
+    assert len(cursor.calls) == 1
 
 
 def test_as_of_exact_key_filter_accepts_historical_versions():
@@ -139,7 +218,7 @@ def test_memory_item_key_is_in_vector_search_text_and_worker_embedding_text():
     assert "mi.content->>'item_key'" in item_vec_sql
 
     class EmptyCursor:
-        def execute(self, sql, params):
+        def execute(self, sql, params, **kwargs):
             self.sql, self.params = sql, params
 
         def fetchall(self):
@@ -148,6 +227,36 @@ def test_memory_item_key_is_in_vector_search_text_and_worker_embedding_text():
     worker_cursor = EmptyCursor()
     assert fetch_item_batch(worker_cursor, 1) == []
     assert "mi.content->>'item_key'" in worker_cursor.sql
+
+
+def test_item_vector_search_starts_from_scoped_items_and_uses_primary_key_lookup():
+    retriever = HybridRetriever({"retrieval_query_cache_max": 0})
+    retriever._encode_query = lambda _query: [0.0] * 1024
+    cursor = _RecordingCursor()
+
+    retriever._run_legs(cursor, "session state", 5, False, "project-a", None, None)
+
+    item_vec_sql = next(sql for sql, _params in cursor.calls
+                        if "order by mie.embedding" in sql).lower()
+    assert "from memory_items mi" in item_vec_sql
+    assert "cross join lateral" in item_vec_sql
+    assert "where mie.item_id = mi.item_id" in item_vec_sql
+    assert "mi.project_id = %(project_id)s" in item_vec_sql
+
+
+def test_unscoped_item_vector_search_uses_exact_materialized_vector_scan():
+    retriever = HybridRetriever({"retrieval_query_cache_max": 0})
+    retriever._encode_query = lambda _query: [0.0] * 1024
+    cursor = _RecordingCursor()
+
+    retriever._run_legs(cursor, "global memory search", 5, False, None, None, None)
+
+    item_vec_sql = next(sql for sql, _params in cursor.calls
+                        if "order by mie.embedding" in sql).lower()
+    assert "with current_item_vectors as materialized" in item_vec_sql
+    assert "from current_item_vectors mie" in item_vec_sql
+    assert "join memory_items mi on mi.item_id = mie.item_id" in item_vec_sql
+    assert "cross join lateral" not in item_vec_sql
 
 
 def test_explicit_question_shell_accepts_bounded_long_topic():
@@ -218,7 +327,18 @@ def test_long_query_embedding_uses_bounded_head_and_tail():
     retriever._embedder = FakeEmbedder()
 
     assert retriever._encode_query(query) == [0.25] * 1024
-    assert retriever._embedder.calls == [([_bounded_query(query)], 128)]
+    assert retriever._embedder.calls == [([_bounded_embedding_query(query)], 128)]
+
+
+def test_embedding_query_keeps_short_text_and_bounds_long_text_to_128_chars():
+    short_query = "  решение\nпо памяти  "
+    long_query = "alpha " * 50 + "target-at-the-end"
+
+    assert _bounded_embedding_query(short_query) == "решение по памяти"
+    bounded = _bounded_embedding_query(long_query)
+    assert len(bounded) <= MAX_EMBED_QUERY_CHARS == 128
+    assert bounded.startswith("alpha alpha")
+    assert bounded.endswith("target-at-the-end")
 
 
 def test_long_query_bounds_fts_and_embedding_input():
@@ -242,12 +362,12 @@ def test_long_query_bounds_fts_and_embedding_input():
     retriever._run_legs(cursor, query, 5, False, "project-a", None, None)
 
     bounded = _bounded_query(query)
-    assert len(bounded) <= 512
-    assert bounded.startswith(" ".join(query.split())[:256].rstrip())
-    assert bounded.endswith(" ".join(query.split())[-255:].lstrip())
+    assert len(bounded) <= 256
+    assert bounded.startswith(" ".join(query.split())[:128].rstrip())
+    assert bounded.endswith(" ".join(query.split())[-127:].lstrip())
     assert cursor.calls[0][1]["q"] == bounded
     assert cursor.calls[1][1]["q"] == bounded
-    assert retriever._embedder.calls == [( [bounded], 128)]
+    assert retriever._embedder.calls == [([_bounded_embedding_query(query)], 128)]
 
 
 def test_simultaneous_identical_query_embeddings_are_single_flight():
@@ -393,7 +513,7 @@ def test_exact_current_item_key_skips_onnx_but_keeps_provenance():
     row = (
         "item:item-1", "event-1", "item-1", None, "project-1", "MEMORY_ITEM",
         "CONSTRAINT", datetime.now(UTC), "vector_backend constraint",
-        ["event-1"], 0.99, datetime.now(UTC), None, False,
+        ["event-1"], 0.99, datetime.now(UTC), None, False, "CONFIRMED",
     )
 
     class Cursor:
@@ -406,7 +526,7 @@ def test_exact_current_item_key_skips_onnx_but_keeps_provenance():
         def __exit__(self, *_args):
             return False
 
-        def execute(self, sql, params):
+        def execute(self, sql, params, **kwargs):
             self.calls.append((sql, params))
 
         def fetchall(self):
@@ -434,13 +554,14 @@ def test_exact_current_item_key_skips_onnx_but_keeps_provenance():
     assert result["vector_skipped"] == "exact_item_key"
     assert result["vector_degraded"] is False
     assert result["results"][0]["source_event_ids"] == ["event-1"]
+    assert result["results"][0]["memory_item_status"] == "CONFIRMED"
 
 
 def test_delimited_topic_requires_literal_high_confidence_fts_match():
     row = (
         "item:item-2", "event-2", "item-2", None, "project-1", "MEMORY_ITEM",
         "DECISION", datetime.now(UTC), "memory consolidation policy",
-        ["event-2"], 0.99, datetime.now(UTC), None, False,
+        ["event-2"], 0.99, datetime.now(UTC), None, False, "CANDIDATE",
     )
 
     class Cursor:
@@ -453,7 +574,7 @@ def test_delimited_topic_requires_literal_high_confidence_fts_match():
         def __exit__(self, *_args):
             return False
 
-        def execute(self, sql, params):
+        def execute(self, sql, params, **kwargs):
             self.calls.append((sql, params))
 
         def fetchall(self):
@@ -480,13 +601,14 @@ def test_delimited_topic_requires_literal_high_confidence_fts_match():
     assert conn.cursor_value.calls[0][1]["q"] == "memory consolidation policy"
     assert result["vector_skipped"] == "exact_item_topic"
     assert result["results"][0]["memory_item_id"] == "item-2"
+    assert result["results"][0]["memory_item_status"] == "CANDIDATE"
 
 
 def test_supported_question_shell_uses_same_literal_topic_guard():
     row = (
         "item:item-3", "event-3", "item-3", None, "project-1", "MEMORY_ITEM",
         "CONSTRAINT", datetime.now(UTC), "MegaBrain retrieval latency target",
-        ["event-3"], 0.99, datetime.now(UTC), None, False,
+        ["event-3"], 0.99, datetime.now(UTC), None, False, "CONFIRMED",
     )
 
     class Cursor:
@@ -499,7 +621,7 @@ def test_supported_question_shell_uses_same_literal_topic_guard():
         def __exit__(self, *_args):
             return False
 
-        def execute(self, sql, params):
+        def execute(self, sql, params, **kwargs):
             self.calls.append((sql, params))
 
         def fetchall(self):
@@ -527,6 +649,7 @@ def test_supported_question_shell_uses_same_literal_topic_guard():
     assert conn.cursor_value.calls[0][1]["q"] == "MegaBrain retrieval"
     assert result["vector_skipped"] == "exact_item_topic"
     assert result["results"][0]["memory_item_id"] == "item-3"
+    assert result["results"][0]["memory_item_status"] == "CONFIRMED"
 
 
 def test_unmatched_explicit_key_falls_back_to_semantic_hybrid_search():
@@ -540,7 +663,7 @@ def test_unmatched_explicit_key_falls_back_to_semantic_hybrid_search():
         def __exit__(self, *_args):
             return False
 
-        def execute(self, sql, params):
+        def execute(self, sql, params, **kwargs):
             self.calls.append((sql, params))
 
         def fetchall(self):

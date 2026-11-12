@@ -23,7 +23,8 @@ from core.memory_item_text import MEMORY_ITEM_TEXT_SQL
 RRF_K = 60
 EMBEDDING_MODEL = "bge-m3-int8-onnx"
 EMBEDDING_DIM = 1024
-MAX_QUERY_CHARS = 512
+MAX_QUERY_CHARS = 256
+MAX_EMBED_QUERY_CHARS = 128
 
 
 def _bounded_query(query: str) -> str:
@@ -34,6 +35,33 @@ def _bounded_query(query: str) -> str:
     head_chars = MAX_QUERY_CHARS // 2
     tail_chars = MAX_QUERY_CHARS - head_chars - 1
     return f"{normalized[:head_chars].rstrip()} {normalized[-tail_chars:].lstrip()}"
+
+
+def _bounded_embedding_query(query: str) -> str:
+    """Keep a bounded head+tail for BGE inference; FTS keeps the wider query."""
+    normalized = " ".join(str(query).split())
+    if len(normalized) <= MAX_EMBED_QUERY_CHARS:
+        return normalized
+    head_chars = MAX_EMBED_QUERY_CHARS // 2
+    tail_chars = MAX_EMBED_QUERY_CHARS - head_chars - 1
+    return f"{normalized[:head_chars].rstrip()} {normalized[-tail_chars:].lstrip()}"
+
+
+def _execute_fts(cur, sql: str, params: dict) -> None:
+    """Run web-search FTS, falling back to literal terms on tsquery parser faults."""
+    try:
+        cur.execute(sql, params)
+    except psycopg.Error as exc:
+        diagnostic = getattr(getattr(exc, "diag", None), "message_primary", None)
+        diagnostic = (diagnostic or str(exc)).lower()
+        if exc.sqlstate != "XX000" or "tsquery" not in diagnostic:
+            raise
+        fallback_sql = sql.replace("websearch_to_tsquery(", "plainto_tsquery(", 1)
+        if fallback_sql == sql:
+            raise
+        cur.execute(fallback_sql, params)
+
+
 MAX_DOC_CHARS = 4000
 MAX_LEN = 512
 ITEM_WEIGHT = 1.35
@@ -88,7 +116,7 @@ class HybridRetriever:
                e.created_at, e.payload->>'text' as text,
                null::text[] as source_event_ids, null::real as confidence,
                null::timestamptz as valid_from, null::timestamptz as valid_to,
-               false as superseded
+               false as superseded, null::text as memory_item_status
         from events e
         where e.fts @@ websearch_to_tsquery('simple', %(q)s)
           and length(trim(coalesce(e.payload->>'text',''))) > 0
@@ -100,11 +128,13 @@ class HybridRetriever:
                e.created_at, e.payload->>'text' as text,
                null::text[] as source_event_ids, null::real as confidence,
                null::timestamptz as valid_from, null::timestamptz as valid_to,
-               false as superseded
+               false as superseded, null::text as memory_item_status
         from memory_embeddings me
         join events e on e.event_id = me.event_id
         where me.model_version = %(mv)s and me.dimension = %(dim)s
-          and (%(project_id)s::text is null or (me.project_id = %(project_id)s and e.project_id = %(project_id)s))
+          and (%(project_id)s::text is null
+               or (me.project_id = %(project_id)s and e.project_id = %(project_id)s)
+               or (me.project_id is null and e.project_id is null))
           and me.embedding <=> %(vec)s::vector < 0.98
     """
 
@@ -117,7 +147,8 @@ class HybridRetriever:
                'MEMORY_ITEM' as event_type, mi.kind as source,
                mi.valid_from as created_at, {ITEM_TEXT} as text,
                mi.source_event_ids, mi.confidence, mi.valid_from, mi.valid_to,
-               (mi.valid_to is not null) as superseded
+               (mi.valid_to is not null) as superseded,
+               mi.content->>'status' as memory_item_status
         from memory_items mi
         where to_tsvector('simple', mi.content::text) @@ websearch_to_tsquery('simple', %(q)s)
     """
@@ -129,11 +160,37 @@ class HybridRetriever:
                'MEMORY_ITEM' as event_type, mi.kind as source,
                mi.valid_from as created_at, {ITEM_TEXT} as text,
                mi.source_event_ids, mi.confidence, mi.valid_from, mi.valid_to,
-               (mi.valid_to is not null) as superseded
-        from memory_item_embeddings mie
+               (mi.valid_to is not null) as superseded,
+               mi.content->>'status' as memory_item_status
+        from memory_items mi
+        cross join lateral (
+            select mie.embedding
+            from memory_item_embeddings mie
+            where mie.item_id = mi.item_id
+              and mie.model_version = %(mv)s
+              and mie.dimension = %(dim)s
+            limit 1
+        ) mie
+        where mie.embedding <=> %(vec)s::vector < 0.98
+    """
+
+    ITEM_VEC_UNSCOPED_SQL = f"""
+        with current_item_vectors as materialized (
+            select item_id, embedding
+            from memory_item_embeddings
+            where model_version = %(mv)s and dimension = %(dim)s
+        )
+        select 'item:' || mi.item_id as key,
+               coalesce(mi.source_event_ids[1], 'memory_item:' || mi.item_id) as event_id,
+               mi.item_id, null::text as session_id, mi.project_id,
+               'MEMORY_ITEM' as event_type, mi.kind as source,
+               mi.valid_from as created_at, {ITEM_TEXT} as text,
+               mi.source_event_ids, mi.confidence, mi.valid_from, mi.valid_to,
+               (mi.valid_to is not null) as superseded,
+               mi.content->>'status' as memory_item_status
+        from current_item_vectors mie
         join memory_items mi on mi.item_id = mie.item_id
-        where mie.model_version = %(mv)s and mie.dimension = %(dim)s
-          and mie.embedding <=> %(vec)s::vector < 0.98
+        where mie.embedding <=> %(vec)s::vector < 0.98
     """
 
     E5_ITEM_VEC_SQL = f"""
@@ -144,6 +201,7 @@ class HybridRetriever:
                mi.valid_from as created_at, {ITEM_TEXT} as text,
                mi.source_event_ids, mi.confidence, mi.valid_from, mi.valid_to,
                (mi.valid_to is not null) as superseded,
+               mi.content->>'status' as memory_item_status,
                1 - (mie.embedding <=> %(vec)s::vector) as similarity
         from memory_item_embeddings_e5 mie
         join memory_items mi on mi.item_id = mie.item_id
@@ -163,7 +221,8 @@ class HybridRetriever:
                'MEMORY_ITEM' as event_type, mi.kind as source,
                mi.valid_from as created_at, {ITEM_TEXT} as text,
                mi.source_event_ids, mi.confidence, mi.valid_from, mi.valid_to,
-               (mi.valid_to is not null) as superseded
+               (mi.valid_to is not null) as superseded,
+               mi.content->>'status' as memory_item_status
         from memory_items mi
         where lower(mi.content->>'item_key') = lower(%(item_key)s)
           and mi.confidence >= 0.9
@@ -179,7 +238,8 @@ class HybridRetriever:
                'MEMORY_ITEM' as event_type, mi.kind as source,
                mi.valid_from as created_at, {ITEM_TEXT} as text,
                mi.source_event_ids, mi.confidence, mi.valid_from, mi.valid_to,
-               (mi.valid_to is not null) as superseded
+               (mi.valid_to is not null) as superseded,
+               mi.content->>'status' as memory_item_status
         from memory_items mi
         where mi.source_event_ids && %(source_event_ids)s
           and mi.project_id = %(project_id)s
@@ -245,7 +305,7 @@ class HybridRetriever:
         # The tokenizer treats runs of whitespace as separators. Canonicalize
         # before both caching and inference so transport formatting (newlines,
         # tabs, repeated spaces) does not trigger an identical ONNX pass.
-        normalized_query = _bounded_query(query)
+        normalized_query = _bounded_embedding_query(query)
         cache_key = normalized_query
         now = time.monotonic()
         with self._query_cache_lock:
@@ -331,7 +391,7 @@ class HybridRetriever:
             extra += f" and {prefix}.session_id = %(session_id)s"
             params["session_id"] = session_id
         if project_id:
-            extra += f" and {prefix}.project_id = %(project_id)s"
+            extra += f" and ({prefix}.project_id is null or {prefix}.project_id = %(project_id)s)"
             params["project_id"] = project_id
         return extra, params
 
@@ -385,14 +445,19 @@ class HybridRetriever:
             fts_params["at_revision"] = at_revision
             event_extra += (" and e.project_revision_trusted is true"
                             " and e.project_revision <= %(at_revision)s")
-        cur.execute(self.FTS_SQL + event_extra + " order by e.created_at desc limit %(lim)s", fts_params)
+        _execute_fts(
+            cur, self.FTS_SQL + event_extra + " order by e.created_at desc limit %(lim)s",
+            fts_params,
+        )
         event_fts_rows = self._fetch(cur)
 
         item_extra, item_params = self._item_where(
             deep, project_id, session_id, at_time, at_revision)
         item_fts_params = {"q": fts_query, "lim": limit * 3, **item_params}
-        cur.execute(self.ITEM_FTS_SQL + item_extra + " order by mi.valid_from desc limit %(lim)s",
-                    item_fts_params)
+        _execute_fts(
+            cur, self.ITEM_FTS_SQL + item_extra + " order by mi.valid_from desc limit %(lim)s",
+            item_fts_params,
+        )
         item_fts_rows = self._fetch(cur)
 
         qvec = self._encode_query(query)
@@ -416,12 +481,18 @@ class HybridRetriever:
             vparams["at_revision"] = at_revision
         try:
             cur.execute(self.VEC_SQL + event_extra +
-                        " order by me.embedding <=> %(vec)s::vector limit %(lim)s", vparams)
+                        " order by me.embedding <=> %(vec)s::vector limit %(lim)s",
+                        vparams, prepare=False)
             event_vec_rows = self._fetch(cur)
             iparams = {"mv": EMBEDDING_MODEL_VERSION, "dim": EMBEDDING_DIM,
                        "vec": vparams["vec"], "lim": limit * 3, **item_params}
-            cur.execute(self.ITEM_VEC_SQL + item_extra +
-                        " order by mie.embedding <=> %(vec)s::vector limit %(lim)s", iparams)
+            item_vec_sql = self.ITEM_VEC_SQL
+            if (project_id is None and session_id is None and at_time is None
+                    and at_revision is None):
+                item_vec_sql = self.ITEM_VEC_UNSCOPED_SQL
+            cur.execute(item_vec_sql + item_extra +
+                        " order by mie.embedding <=> %(vec)s::vector limit %(lim)s",
+                        iparams, prepare=False)
             item_vec_rows = self._fetch(cur)
             vec_ok = True
         except Exception as error:
@@ -462,11 +533,11 @@ class HybridRetriever:
 
         if len(rows) < 2:
             return None
-        best, second = float(rows[0][14]), float(rows[1][14])
+        best, second = float(rows[0][15]), float(rows[1][15])
         if (best < float(self.cfg.get("retrieval_e5_min_similarity", 0.80))
                 or best - second < float(self.cfg.get("retrieval_e5_min_margin", 0.02))):
             return None
-        return [row[:14] for row in rows[:max(limit * 3, 20)]]
+        return [row[:15] for row in rows[:max(limit * 3, 20)]]
 
     @staticmethod
     def _delimited_topic(query: str) -> str | None:
@@ -718,21 +789,23 @@ class HybridRetriever:
         for row, sources, score in rrf:
             (key, event_id, item_id, session, project, event_type, source,
              created_at, text, source_ids, confidence, vf, vt,
-             item_superseded) = row
+             item_superseded) = row[:14]
+            memory_item_status = row[14] if len(row) > 14 else None
             f = flags.get(event_id, {}) if item_id is None else {}
             superseded = bool(item_superseded or f.get("superseded", False))
             if at_time is None and at_revision is None and item_id is None and superseded:
                 score *= 0.25
             score *= self._intent_weight(query, row)
             score *= self._exact_text_weight(query, text)
-            scored.append((row, sources, score, superseded, f))
+            scored.append((row, sources, score, superseded, f, memory_item_status))
 
         scored.sort(key=lambda value: -value[2])
         results = []
-        for rank, (row, sources, score, superseded, f) in enumerate(scored[:limit], start=1):
+        for rank, (row, sources, score, superseded, f, memory_item_status) in enumerate(
+                scored[:limit], start=1):
             (key, event_id, item_id, session, project, event_type, source,
              created_at, text, source_ids, confidence, vf, vt,
-             item_superseded) = row
+             item_superseded) = row[:14]
             result = {
                 "event_id": event_id,
                 "session_id": session,
@@ -754,6 +827,7 @@ class HybridRetriever:
                     "memory_kind": source,
                     "source_event_ids": source_ids or [],
                     "confidence": confidence,
+                    "memory_item_status": memory_item_status or "UNSPECIFIED",
                 })
             results.append(result)
         return {

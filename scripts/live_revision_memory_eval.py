@@ -108,7 +108,7 @@ def run() -> int:
         historical_ms.append(float(historical.get("latency_ms", historical["client_latency_ms"])))
         for result in (current, historical):
             degraded += int(result.get("vector_degraded", True))
-            leaks += sum(hit.get("project_id") != record["project_id"]
+            leaks += sum(hit.get("project_id") not in (None, record["project_id"])
                          for hit in result.get("results", []))
         future_top5 += int((_rank(historical_results, record["new_id"]) or 51) <= 5)
 

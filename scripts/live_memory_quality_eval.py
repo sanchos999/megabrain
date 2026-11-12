@@ -99,10 +99,68 @@ def _sample(dsn: str, per_kind: int) -> list[dict]:
     return selected
 
 
+def _sample_non_test_memory_sources(dsn: str) -> list[dict]:
+    """Sample current source-linked memories from non-test Botik projects.
+
+    The broad EXPLICIT evaluator above intentionally keeps its historical
+    corpus. This second sample excludes projects whose identifiers mark them
+    as test/eval/benchmark data and includes every current memory kind.
+    """
+    selected: list[dict] = []
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        if conn.execute("SHOW transaction_read_only").fetchone()[0] != "on":
+            raise RuntimeError("Database connection is not read-only.")
+        rows = conn.execute(
+            """SELECT mi.item_id, mi.project_id, mi.kind, mi.content,
+                      mi.source_event_ids, mi.confidence,
+                      src.payload->>'text' AS source_text,
+                      EXISTS (SELECT 1 FROM memory_item_embeddings mie
+                              WHERE mie.item_id=mi.item_id),
+                      EXISTS (SELECT 1 FROM memory_embeddings me
+                              WHERE me.event_id=ANY(mi.source_event_ids))
+                 FROM memory_items mi
+                 LEFT JOIN events src
+                   ON src.event_id=mi.source_event_ids[1]
+                  AND src.project_id=mi.project_id
+                WHERE mi.valid_to IS NULL
+                  AND lower(mi.project_id) NOT LIKE '%test%'
+                  AND lower(mi.project_id) NOT LIKE '%eval%'
+                  AND lower(mi.project_id) NOT LIKE '%bench%'
+                  AND cardinality(mi.source_event_ids)>0
+                ORDER BY md5(mi.item_id || 'live-nontest-memory-eval-v1')"""
+        ).fetchall()
+        for (item_id, project_id, kind, content, source_ids, confidence,
+             source_text, item_indexed, source_indexed) in rows:
+            source_text = str(source_text or "").strip()
+            if len(source_text) < 20:
+                continue
+            content = content if isinstance(content, dict) else json.loads(content or "{}")
+            topic = str(content.get("item_key") or content.get("title") or "").strip()
+            if len(topic) < 3:
+                text = str(content.get("text") or content.get("content") or "").strip()
+                topic = " ".join(text.split()[:8])
+            if len(topic) < 3:
+                topic = " ".join(source_text.split()[:8])
+            selected.append({
+                "item_id": item_id,
+                "project_id": project_id,
+                "kind": kind,
+                "source_ids": set(source_ids or []),
+                "confidence": float(confidence or 0),
+                "item_bge_indexed": bool(item_indexed),
+                "source_bge_indexed": bool(source_indexed),
+                "fts_query": topic[:220],
+                "question": f"Что важно помнить по теме: {topic[:200]}?",
+                "source_query": source_text[:1000],
+            })
+    return selected
+
+
 def _evaluate(retriever: HybridRetriever, records: list[dict], *, fts_key_only: bool = False) -> dict:
     ranks: dict[str, list[int]] = {kind: [] for kind in QUESTIONS}
     latencies: list[float] = []
-    project_leaks = vector_degraded = 0
+    project_leaks = vector_degraded = shared_unassigned_hits = 0
+    queries_with_shared_unassigned_hits = 0
     for record in records:
         query = record["fts_query"] if fts_key_only else record["question"]
         result = retriever.search(query, mode="WARM", limit=50,
@@ -110,7 +168,11 @@ def _evaluate(retriever: HybridRetriever, records: list[dict], *, fts_key_only: 
         latencies.append(float(result["latency_ms"]))
         vector_degraded += int(result.get("vector_degraded", True))
         project_leaks += sum(1 for hit in result.get("results", [])
-                             if hit.get("project_id") != record["project_id"])
+                             if hit.get("project_id") not in (None, record["project_id"]))
+        unassigned_hits = sum(1 for hit in result.get("results", [])
+                              if hit.get("project_id") is None)
+        shared_unassigned_hits += unassigned_hits
+        queries_with_shared_unassigned_hits += int(unassigned_hits > 0)
         for rank, hit in enumerate(result.get("results", []), 1):
             source_match = bool(record["source_ids"] & set(hit.get("source_event_ids") or []))
             if hit.get("memory_item_id") == record["item_id"] or source_match:
@@ -128,6 +190,8 @@ def _evaluate(retriever: HybridRetriever, records: list[dict], *, fts_key_only: 
         "mrr_at_10": round(sum(1 / rank for rank in rank_values) / queries, 4),
         "top_1": sum(rank == 1 for rank in rank_values),
         "project_leaks": project_leaks,
+        "shared_unassigned_hits": shared_unassigned_hits,
+        "queries_with_shared_unassigned_hits": queries_with_shared_unassigned_hits,
         "vector_degraded_queries": vector_degraded,
         "search_latency_ms_p50": round(statistics.median(sorted_latency), 2),
         "search_latency_ms_p95": round(sorted_latency[min(queries - 1, int(queries * 0.95))], 2),
@@ -164,11 +228,13 @@ def _evaluate_api(records: list[dict], token: str, *, query_field: str = "questi
     target_miss_with_source_hit = 0
     target_miss_source_rank_buckets = {"top5": 0, "top20": 0, "top50": 0}
     skipped_key = skipped_topic = degraded = project_leaks = 0
+    shared_unassigned_hits = queries_with_shared_unassigned_hits = 0
     retrieval_paths: dict[str, int] = {}
     length_buckets: dict[str, list[float]] = {}
     for index, record in enumerate(records, 1):
-        # Trailing whitespace is tokenizer-equivalent but defeats the exact
-        # query-vector cache, so semantic fallback timings remain cache-cold.
+        # Vary transport whitespace without changing the normalized query.
+        # The retriever canonicalizes it before tokenization and caching, so
+        # repeated normalized inputs intentionally exercise the cache.
         base_query = record[query_field]
         query = base_query + " " * index
         payload = json.dumps({
@@ -204,7 +270,11 @@ def _evaluate_api(records: list[dict], token: str, *, query_field: str = "questi
             full_server.append(server_time)
         degraded += int(result.get("vector_degraded", True))
         project_leaks += sum(1 for hit in result.get("results", [])
-                             if hit.get("project_id") != record["project_id"])
+                             if hit.get("project_id") not in (None, record["project_id"]))
+        unassigned_hits = sum(1 for hit in result.get("results", [])
+                              if hit.get("project_id") is None)
+        shared_unassigned_hits += unassigned_hits
+        queries_with_shared_unassigned_hits += int(unassigned_hits > 0)
         if require_item_match and result.get("results"):
             top_scores.append(float(result["results"][0].get("score") or 0))
         target_rank = None
@@ -228,7 +298,8 @@ def _evaluate_api(records: list[dict], token: str, *, query_field: str = "questi
             if target_rank is None and result.get("results"):
                 target_miss_top_scores.append(float(result["results"][0].get("score") or 0))
             if target_rank is None:
-                target_miss_by_kind[record["kind"]] += 1
+                target_miss_by_kind[record["kind"]] = (
+                    target_miss_by_kind.get(record["kind"], 0) + 1)
                 query_length = len(record[query_field])
                 length_bucket = "<=160" if query_length <= 160 else "161-512" if query_length <= 512 else ">512"
                 target_miss_by_query_length[length_bucket] += 1
@@ -266,6 +337,8 @@ def _evaluate_api(records: list[dict], token: str, *, query_field: str = "questi
         },
         "vector_degraded_queries": degraded,
         "project_leaks": project_leaks,
+        "shared_unassigned_hits": shared_unassigned_hits,
+        "queries_with_shared_unassigned_hits": queries_with_shared_unassigned_hits,
         "http_p50_ms": round(statistics.median(sorted_times), 2),
         "http_p95_ms": round(sorted_times[min(len(records) - 1, int(len(records) * 0.95))], 2),
         "server_p50_ms": round(statistics.median(sorted_server), 2),
@@ -354,7 +427,7 @@ def _discussion_topic_probe(records: list[dict], token: str) -> dict:
             paths[path] = paths.get(path, 0) + 1
             vector_degraded += int(result.get("vector_degraded", True))
             project_leaks += sum(1 for hit in result.get("results", [])
-                                 if hit.get("project_id") != record["project_id"])
+                                 if hit.get("project_id") not in (None, record["project_id"]))
             target_ranks.append(next((rank for rank, hit in enumerate(
                 result.get("results", []), 1)
                 if hit.get("memory_item_id") == record["item_id"]), None))
@@ -506,6 +579,10 @@ def run() -> int:
     source_head_tail_metrics = _evaluate_api(
         source_records, token, query_field="source_query_head_tail_512",
         require_item_match=True)
+    production_source_records = _sample_non_test_memory_sources(dsn)
+    production_memory_metrics = _evaluate_api(
+        production_source_records, token, query_field="source_query",
+        require_item_match=True)
     whitespace_cache_metrics = _whitespace_cache_probe(source_records, token)
     e5_source_metrics = _e5_source_probe(source_records, dsn, token)
     discussion_topic_metrics = _discussion_topic_probe(records, token)
@@ -522,6 +599,11 @@ def run() -> int:
             "queries": len(source_records),
             **source_query_metrics,
         },
+        "non_test_project_memory_source_metrics": {
+            "evaluation": "current source-linked memories from project ids without test/eval/bench markers",
+            "queries": len(production_source_records),
+            **production_memory_metrics,
+        },
         "source_message_truncation_probes": {
             "256_chars": source_256_metrics,
             "512_chars": source_512_metrics,
@@ -536,6 +618,8 @@ def run() -> int:
         metrics["project_leaks"] or metrics["vector_degraded_queries"]
         or discussion_topic_metrics["project_leaks"]
         or discussion_topic_metrics["vector_degraded_queries"]
+        or production_memory_metrics["project_leaks"]
+        or production_memory_metrics["vector_degraded_queries"]
     )
     return int(bool(unsafe))
 

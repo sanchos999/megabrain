@@ -83,6 +83,15 @@ class Postgres:
             self._local.conn = c
         return c
 
+    def reset_thread_connection(self) -> None:
+        """Close this thread's connection after a transient database failure."""
+        conn = getattr(self._local, "conn", None)
+        try:
+            if conn is not None and not conn.closed:
+                conn.close()
+        finally:
+            self._local.conn = None
+
     def ping(self) -> bool:
         try:
             with self.conn.cursor() as cur:

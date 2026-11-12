@@ -13,8 +13,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "integrations" / "hermes"
-# vendored name -> canonical name. events.py is renamed to mb_events.py in the
-# plugin dir to avoid colliding with megabrain's own `events` package.
+# vendored name -> canonical name. mb_events.py avoids colliding with
+# MegaBrain's own `events` package; sync it from the canonical mb_events module.
 MODULES = {
     "__init__.py": "__init__.py",
     "README.md": "README.md",
@@ -22,7 +22,7 @@ MODULES = {
     "megabrain_client.py": "megabrain_client.py",
     "outbox.py": "outbox.py",
     "sender.py": "sender.py",
-    "mb_events.py": "events.py",
+    "mb_events.py": "mb_events.py",
 }
 
 

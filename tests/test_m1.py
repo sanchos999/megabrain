@@ -319,13 +319,22 @@ def test_health_and_version():
 
 def test_no_llm_on_critical_path():
     """Capsule build and resolver must not invoke any LLM client."""
+    import ast
+
     import api.main as m
     import projects.resolver as res
     import retrieval.capsule as caps
     for mod in (m, caps, res):
-        src = open(mod.__file__).read()
-        for banned in ("openai", "anthropic", "httpx.post", "requests.post"):
-            assert banned not in src, f"banned dependency {banned} in {mod.__name__}"
+        tree = ast.parse(open(mod.__file__).read())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split(".")[0])
+        banned_imports = imported & {"openai", "anthropic", "httpx", "requests"}
+        assert not banned_imports, (
+            f"external LLM/HTTP client imported by {mod.__name__}: {banned_imports}")
     # capsule reports llm_used=False and flag exists
     pid = f"mbtest_nollm_{uuid.uuid4().hex[:6]}"
     client.post("/v1/projects", json={"project_id": pid, "name": "NoLLM"})

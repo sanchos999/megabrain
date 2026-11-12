@@ -98,7 +98,8 @@ def test_e5_semantic_gate_requires_score_and_margin(monkeypatch):
     from benchmark.onnx_e5_embed import EMBEDDING_MODEL_VERSION
 
     row = ("item:1", "event-1", "1", None, "project-a", "MEMORY_ITEM",
-           "DECISION", None, "decision text", ["event-1"], 0.99, None, None, False, 0.87)
+           "DECISION", None, "decision text", ["event-1"], 0.99, None, None,
+           False, "CONFIRMED", 0.87)
 
     class Cursor:
         def execute(self, sql, params):
@@ -120,6 +121,7 @@ def test_e5_semantic_gate_requires_score_and_margin(monkeypatch):
     assert cur.params["mv"] == EMBEDDING_MODEL_VERSION
     assert cur.params["project_id"] == "project-a"
     assert "mi.valid_to is null" in cur.sql
+    assert hits[0][14] == "CONFIRMED"
 
     cur.fetchall = lambda: [row, row[:-1] + (0.86,)]
     assert retriever._confident_e5_items(cur, "ambiguous query", 5,

@@ -17,12 +17,14 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
+import psycopg
 
 from core.config import load_config
 from core.hot import L0RAM, L1Redis, Telemetry
 from operations import dead_letter_stats, outbox_counts, scheduler_backlog, unit_state, worker_rows
 from projects.resolver import ProjectResolver
 from retrieval.capsule import CapsuleBuilder
+from api.search_retry import search_project_memory
 from storage.pg import BlobStore, Postgres
 
 VERSION = "0.2.1"
@@ -555,15 +557,20 @@ async def memory_search(s: MemorySearchIn):
         s.project_id = resolved.get("project_id")
     if not s.project_id:
         raise HTTPException(status_code=422, detail="project_id required for scoped memory search")
-    if STATE["pg"].get_project(s.project_id) is None:
+    # WARM / DEEP. Run project validation and retrieval off the event loop; a
+    # read can safely reconnect and retry if PostgreSQL restarts mid-request.
+    try:
+        res = await run_in_threadpool(
+            search_project_memory, STATE["pg"], _get_retriever(), s.project_id,
+            query=s.query, mode=mode, limit=s.limit,
+            project_id=s.project_id, session_id=s.session_id,
+            at_time=s.at_time, at_revision=s.at_revision)
+    except psycopg.OperationalError:
+        STATE["telemetry"].inc("memory_search_db_unavailable")
+        raise HTTPException(
+            status_code=503, detail="memory store temporarily unavailable") from None
+    if res is None:
         raise HTTPException(status_code=404, detail="project not found")
-
-    # WARM / DEEP
-    res = await run_in_threadpool(
-        _get_retriever().search,
-        query=s.query, mode=mode, limit=s.limit,
-        project_id=s.project_id, session_id=s.session_id,
-        at_time=s.at_time, at_revision=s.at_revision)
     if res.get("vector_degraded"):
         STATE["telemetry"].inc("retrieval_vector_degraded")
     elif res.get("vector_leg"):

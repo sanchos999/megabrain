@@ -148,7 +148,7 @@ def run() -> int:
         for result in (current, historical):
             vector_degraded += int(result.get("vector_degraded", True))
             project_leaks += sum(
-                hit.get("project_id") != record["project_id"]
+                hit.get("project_id") not in (None, record["project_id"])
                 for hit in result.get("results", [])
             )
 
